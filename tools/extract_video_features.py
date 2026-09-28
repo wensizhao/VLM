@@ -5,10 +5,10 @@
 Run once before training with a frozen backbone::
 
     python tools/extract_video_features.py \\
-        --root ./data \\
-        --split training \\
+        --video-dir ./data/Avenue_Dataset/testing_videos \\
+        --mask-dir ./data/Avenue_Dataset/ground_truth/testing_label_mask \\
         --model ViT-B-32 \\
-        --out ./data/features/training \\
+        --out ./data/features/testing \\
         --batch-size 64
 
 Output: one ``{video_id}.pt`` per video, shape ``(N, D)``, float32, L2-normalized.
@@ -46,39 +46,47 @@ class _FrameIterator:
 
     def __init__(
         self,
-        root: str | Path,
-        split: str = "training",
+        video_dir: str | Path,
+        mask_dir: str | Path | None = None,
+        split: str = "testing",
         image_size: tuple[int, int] = (224, 224),
     ) -> None:
         # 用 VideoDataset 的元数据能力（视频列表、帧数），但不用它的 clip 索引
         from datasets.video_dataset import (
-            _resolve_avenue_root,
             _normalize_split,
+            _resolve_dir,
             VideoRecord,
             _read_video_metadata,
+            _find_mask_path,
             _read_mask_metadata,
         )
-        self.root = _resolve_avenue_root(root)
+        self.video_dir = _resolve_dir(video_dir, "video_dir / video_path")
+        self.mask_dir = (
+            _resolve_dir(mask_dir, "mask_dir / mask_path")
+            if mask_dir is not None and str(mask_dir).strip() != ""
+            else None
+        )
         self.split = _normalize_split(split)
         self.image_size = image_size
 
         # 构建视频元数据列表
-        video_dir = self.root / f"{self.split}_videos"
-        mask_dir = self.root / f"{self.split}_vol"
-        paths = sorted(video_dir.glob("*.avi"))
+        paths = sorted(self.video_dir.glob("*.avi"))
         if not paths:
-            raise FileNotFoundError(f"No videos in {video_dir}")
+            raise FileNotFoundError(f"No videos in {self.video_dir}")
 
         self.records: list[VideoRecord] = []
         for vp in paths:
             vid = vp.stem
-            mp = mask_dir / f"vol{vid}.mat"
-            if not mp.is_file():
-                raise FileNotFoundError(f"Missing annotation: {mp.name}")
             n, fps, fh, fw = _read_video_metadata(vp)
-            mh, mw, mf = _read_mask_metadata(mp)
-            if n != mf:
-                raise RuntimeError(f"Frame mismatch: {vp.name}={n}, {mp.name}={mf}")
+            mp = _find_mask_path(self.mask_dir, vid)
+            if mp is not None:
+                mh, mw, mf = _read_mask_metadata(mp)
+                if n != mf:
+                    raise RuntimeError(
+                        f"Frame mismatch: {vp.name}={n}, {mp.name}={mf}"
+                    )
+            else:
+                mh, mw, mf = fh, fw, n
             self.records.append(VideoRecord(
                 video_id=vid, split=self.split, video_path=vp, mask_path=mp,
                 num_frames=n, fps=fps, frame_height=fh, frame_width=fw,
@@ -114,8 +122,9 @@ class _FrameIterator:
 # ═════════════════════════════════════════════════════════════════
 
 def extract(
-    root: str | Path,
-    split: str,
+    video_dir: str | Path,
+    mask_dir: str | Path | None = None,
+    split: str = "testing",
     model_name: str = "ViT-B-32",
     pretrained: str = "laion2b_s34b_b79k",
     out_dir: str | Path = "./data/features",
@@ -134,8 +143,10 @@ def extract(
     backbone.to(device)
 
     # 2. 构建逐帧数据集
-    print(f"[2/4] Scanning videos from {root}/{split}_videos")
-    iterator = _FrameIterator(root=root, split=split, image_size=image_size)
+    print(f"[2/4] Scanning videos from {video_dir}")
+    iterator = _FrameIterator(
+        video_dir=video_dir, mask_dir=mask_dir, split=split, image_size=image_size,
+    )
     print(f"       Found {len(iterator)} videos, "
           f"{sum(r.num_frames for r in iterator.records):,} total frames")
 
@@ -178,8 +189,12 @@ def main() -> None:
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
-    parser.add_argument("--root", required=True, help="Dataset root directory")
-    parser.add_argument("--split", default="training", help="training | testing")
+    parser.add_argument("--video-dir", required=True,
+                        help="视频目录（必填，如 ./data/Avenue_Dataset/testing_videos）")
+    parser.add_argument("--mask-dir", default=None,
+                        help="GT mask 目录（可选；缺省 = 全正常视频，"
+                             "如 ./data/Avenue_Dataset/ground_truth/testing_label_mask）")
+    parser.add_argument("--split", default="testing", help="training | testing")
     parser.add_argument("--model", default="ViT-B-32", help="CLIP model name")
     parser.add_argument("--pretrained", default="laion2b_s34b_b79k")
     parser.add_argument("--out", default="./data/features", help="Output directory")
@@ -189,7 +204,8 @@ def main() -> None:
 
     args = parser.parse_args()
     extract(
-        root=args.root,
+        video_dir=args.video_dir,
+        mask_dir=args.mask_dir,
         split=args.split,
         model_name=args.model,
         pretrained=args.pretrained,

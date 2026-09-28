@@ -15,6 +15,12 @@
     - temporal anomaly heatmap：逐帧分数曲线 + GT 色带
     - template-based explanation：Matcher(embedding, prompt_embs) 相似度
       降序 → 找出"最符合的异常 prompt"→ 回答"为什么这个视频是异常的"
+
+零样本 CLIP 保底（zero-shot baseline）：
+    传入 prompt 极性 ``polarity`` 后，同一次前向会额外计算一条**完全不经训练**
+    的基线分数：raw CLIP 特征 + 固定余弦相似度 + 极性做差（见
+    ``_zero_shot_frame_scores`` 的数学说明）。指标以 ``zs_`` 前缀与训练指标
+    并列输出——训练后的模型应打平或超过保底，否则说明训练本身出了问题。
 """
 
 from __future__ import annotations
@@ -24,6 +30,8 @@ from typing import Any
 
 import numpy as np
 import torch
+import torch.nn.functional as F
+from torch import Tensor
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
@@ -60,6 +68,63 @@ def _accumulate_scores(
     counts[start:end] += 1.0
 
 
+def _pool_text_tokens(text_feature: Tensor, token_mask: Tensor) -> Tensor:
+    """对 token 级文本特征做 masked mean pooling（排除 padding token）。
+
+    为什么不用普通 mean：encode_text 输出固定长度 L（如 77），序列不足处
+    全是 padding，直接平均会把有效语义稀释。mask 由 token id > 0 得出
+    （open_clip 用 0 做填充，见 CLIPBackbone.tokenize 的文档）。
+
+    Args:
+        text_feature: ``(K, L, D)`` — 原始 CLIP token 级特征。
+        token_mask: ``(K, L)`` — bool，True 为真实 token。
+
+    Returns:
+        ``(K, D)`` — 每个 prompt 一个向量。
+    """
+    mask = token_mask.unsqueeze(-1).to(text_feature.dtype)   # (K, L, 1)
+    pooled = (text_feature * mask).sum(dim=1)                # (K, D)
+    denom = mask.sum(dim=1).clamp(min=1.0)                   # (K, 1)
+    return pooled / denom
+
+
+def _zero_shot_frame_scores(
+    visual_feature: Tensor,
+    txt_pooled: Tensor,
+    abnormal_mask: Tensor,
+    normal_mask: Tensor,
+) -> Tensor:
+    """零样本 CLIP 保底分数——完全不经过任何可训练参数。
+
+    数学定义（v_t 是第 t 帧的原始 CLIP 向量，A/N 是异常/正常 prompt 集合）：
+        zs_t = (1/|A|) Σ_{k∈A} cos(v_t, p_k) − (1/|N|) Σ_{k∈N} cos(v_t, p_k)
+
+    为什么做差而不只取异常均值：相似度整体可能随场景明暗、画面内容整体
+    漂移，异常组与正常组同时被抬高或压低（共模偏移）。组间做差消掉共模
+    部分，留下的才是"相对更接近异常语义"的判别信号。
+
+    为什么不走 Matcher：Matcher 的 logit_scale（以及 learnable 策略的 W）
+    本身是训练对象，训练失败时它们同样是坏的。保底必须独立于一切被训练
+    的参数，因此这里直接写 F.normalize + 点积（即固定余弦相似度）。
+
+    Args:
+        visual_feature: ``(B, T, D)`` — 原始 CLIP 帧特征（未过 Alignment）。
+        txt_pooled: ``(K, D)`` — masked mean 池化后的 prompt 向量。
+        abnormal_mask: ``(K,)`` bool — 极性为 +1 的 prompt。
+        normal_mask: ``(K,)`` bool — 极性为 -1 的 prompt。
+
+    Returns:
+        ``(B, T)`` — 逐帧零样本异常分数（值域约 [-2, 2]，AUC 只看排序）。
+    """
+    B, T, D = visual_feature.shape
+    v = F.normalize(visual_feature.reshape(B * T, D), dim=-1)   # (B*T, D)
+    p = F.normalize(txt_pooled, dim=-1)                          # (K, D)
+    sim = v @ p.T                                                # (B*T, K) 余弦
+    abn = sim[:, abnormal_mask].mean(dim=-1)                     # (B*T,)
+    nor = sim[:, normal_mask].mean(dim=-1)                       # (B*T,)
+    return (abn - nor).reshape(B, T)
+
+
 def evaluate_videos(
     model: VLMModel,
     matcher: Matcher,
@@ -69,6 +134,7 @@ def evaluate_videos(
     top_k: int = 5,
     out_dir: str | Path | None = None,
     save_plots: bool = True,
+    polarity: Tensor | None = None,
 ) -> dict[str, Any]:
     """对整个数据集做视频级评估，返回指标 + 解释 + 可视化文件。
 
@@ -78,6 +144,7 @@ def evaluate_videos(
         3. 按 start_frame 坐标累加 → 每视频稠密逐帧分数
         4. 计算 frame / clip / video 三级指标
         5. 对最异常的 clip 生成解释文本 + 图
+        6. polarity 提供时，同步计算零样本 CLIP 保底指标（zs_* 前缀）
 
     Args:
         model: 训练好的 VLMModel。
@@ -88,6 +155,9 @@ def evaluate_videos(
         top_k: 解释时取相似度最高的前 k 个异常 prompt。
         out_dir: 结果输出目录（None 则不落盘）。
         save_plots: 是否保存可视化图。
+        polarity: ``(K,)`` prompt 极性 {+1 异常, -1 正常, 0 中性}。提供时
+            额外计算零样本 CLIP 基线（不经过任何可训练参数），作为训练效果
+            的保底参照；None 则跳过。
 
     Returns:
         dict：{"metrics": ..., "per_video": ..., "explanations": ...}。
@@ -99,6 +169,36 @@ def evaluate_videos(
 
     prompts = model.prompt_processor.process()
     prompts_with_types = model.prompt_processor.process_with_types()
+
+    # ── 零样本 CLIP 保底（zero-shot baseline）─────────────────────
+    # 设计：完全绕开 alignment / fusion / temporal / head / matcher 这些
+    # 可训练（或随机初始化）的模块，只用冻结 CLIP 的原始特征 + 固定余弦
+    # 相似度 + 极性做差。训练失败时这条路径仍然有效，这就是"保底"的含义。
+    zs_enabled: bool = False
+    zs_txt_pooled: Tensor | None = None
+    accum_zs: dict[str, np.ndarray] = {}
+    zs_clip_scores: list[float] = []
+    # 空张量占位：zs_enabled=False 时不会被使用，避免 Optional 判空散落各处
+    zs_abn_mask = torch.empty(0, dtype=torch.bool, device=device)
+    zs_nor_mask = torch.empty(0, dtype=torch.bool, device=device)
+    zs_token_mask = torch.empty(0, dtype=torch.bool, device=device)
+    if polarity is not None:
+        pol = polarity.to(device)
+        if pol.shape[0] != len(prompts):
+            raise ValueError(
+                f"polarity 长度 ({pol.shape[0]}) 与 prompt 数 ({len(prompts)}) "
+                f"不一致，请检查 polarity 是否来自同一份 prompt 配置。"
+            )
+        abn, nor = pol == 1, pol == -1
+        if not (bool(abn.any()) and bool(nor.any())):
+            log.warning(
+                "Zero-shot baseline skipped: normal 与 abnormal prompt 组需要都非空。"
+            )
+        else:
+            zs_abn_mask, zs_nor_mask = abn, nor
+            # token id > 0 表示真实 token（open_clip 用 0 做 padding）
+            zs_token_mask = model.backbone.tokenize(prompts) > 0   # (K, L)
+            zs_enabled = True
 
     # ── 每视频的累计状态 ─────────────────────────────────────────
     accum: dict[str, np.ndarray] = {}    # video_id → 分数累加
@@ -132,6 +232,21 @@ def evaluate_videos(
             match = matcher(output.embedding, txt_pooled)
             anomaly_sims = match.similarity.cpu().numpy()         # (B, K)
 
+            # 零样本保底：raw CLIP 特征（跳过全部可训练模块）
+            # 文本特征每个 batch 都一样，只在首个 batch 池化一次并复用
+            zs_fs: np.ndarray | None
+            if zs_enabled:
+                if zs_txt_pooled is None:
+                    zs_txt_pooled = _pool_text_tokens(
+                        output.alignment.text_feature, zs_token_mask,
+                    )
+                zs_fs = _zero_shot_frame_scores(
+                    output.alignment.visual_feature, zs_txt_pooled,
+                    zs_abn_mask, zs_nor_mask,
+                ).cpu().numpy()                                     # (B, T)
+            else:
+                zs_fs = None
+
             for b in range(frame_scores.shape[0]):
                 vid = batch["video_id"][b]
                 start = int(batch["start_frame"][b])
@@ -147,6 +262,8 @@ def evaluate_videos(
                     counts[vid] = np.zeros(n, dtype=np.float64)
                     label_acc[vid] = np.zeros(n, dtype=np.float64)
                     label_cnt[vid] = np.zeros(n, dtype=np.float64)
+                    if zs_enabled:
+                        accum_zs[vid] = np.zeros(n, dtype=np.float64)
                     worst_clips[vid] = {
                         "start": start, "clip_score": -1.0,
                         "anomaly_sims": None, "frame_scores": None,
@@ -155,6 +272,11 @@ def evaluate_videos(
                 _accumulate_scores(accum[vid], counts[vid], start, fs)
                 # 标签同样按坐标累加（与分数对齐，保证评估逻辑与标签来源解耦）
                 _accumulate_scores(label_acc[vid], label_cnt[vid], start, lbl.astype(np.float64))
+
+                # 零样本保底分数同样按坐标累加（共用 counts，覆盖次数一致）
+                if zs_fs is not None:
+                    _accumulate_scores(accum_zs[vid], counts[vid], start, zs_fs[b])
+                    zs_clip_scores.append(float(zs_fs[b].max()))
 
                 # clip 级收集
                 clip_scores.append(float(clip_score[b]))
@@ -206,6 +328,24 @@ def evaluate_videos(
         metrics.get("clip_auc", 0.0), metrics.get("clip_ap", 0.0),
         metrics.get("video_auc", 0.0),
     )
+
+    # ── 零样本保底指标（zs_* 前缀，与训练指标并列）──────────────────
+    if zs_enabled:
+        zs_gfs = np.concatenate([
+            accum_zs[vid] / np.maximum(counts[vid], 1.0) for vid in accum
+        ])
+        zs_frame = frame_level_metrics(zs_gfs, gfl)
+        zs_clip = clip_level_metrics(
+            np.asarray(zs_clip_scores), np.asarray(clip_labels),
+        )
+        metrics.update({f"zs_{k}": v for k, v in {**zs_frame, **zs_clip}.items()})
+        log.info(
+            "Zero-shot CLIP 保底 | zs_frame_auc=%.4f zs_clip_auc=%.4f | "
+            "trained: frame_auc=%.4f clip_auc=%.4f —— 训练后应≥保底，"
+            "若明显低于保底说明训练出了问题",
+            zs_frame.get("frame_auc", 0.0), zs_clip.get("clip_auc", 0.0),
+            metrics.get("frame_auc", 0.0), metrics.get("clip_auc", 0.0),
+        )
 
     # ── 可解释性：为每个视频最异常的 clip 生成解释 ─────────────────
     explanations = _build_explanations(

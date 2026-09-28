@@ -24,14 +24,15 @@
 ```
 磁盘上的文件                         Python 对象                    GPU 上的张量
 ═══════════                        ════════════                  ════════════
-                                                          
-  training_videos/01.avi  ─┐                                    
-  training_vol/vol01.mat  ─┤     AvenueVideoRecord              
-                            │    ├─ video_path                  
-                            ├──► ├─ mask_path                   
-                            │    ├─ num_frames                  
-  training_videos/02.avi  ─┤    └─ frame_height/width           
-  training_vol/vol02.mat  ─┘                                    
+                                                           
+  testing_videos/01.avi  ─┐                                    
+  testing_label_mask/    ─┤     AvenueVideoRecord              
+   1_label.mat            ├─ video_path                  
+                          ├──► ├─ mask_path                   
+                          │    ├─ num_frames                  
+  testing_videos/02.avi  ─┤    └─ frame_height/width           
+  testing_label_mask/    ─┘                                    
+   2_label.mat                                                 
                                        │                        
                                        ▼                        
                                AvenueClipRecord         ┌──────────────────┐
@@ -60,47 +61,43 @@
 
 ## 2. Step 0：路径解析 — 让程序"找到"数据
 
-### 2.1 代码：`_resolve_avenue_root()`
+### 2.1 代码：`_resolve_dir()`
+
+数据路径由 **配置驱动**：`configs/experiment.yaml` 的 `data.video_path`（必填）
+与 `data.mask_path`（可选）显式指定，代码不再写死 `training_videos` / `testing_videos`。
 
 ```python
-def _resolve_avenue_root(root: str | Path) -> Path:
-    root_path = Path(root).expanduser().resolve()
-    if (root_path / "training_videos").is_dir():
-        return root_path
-    nested_root = root_path / "Avenue_Dataset"
-    if (nested_root / "training_videos").is_dir():
-        return nested_root
-    raise FileNotFoundError(...)
+def _resolve_dir(path: str | Path, what: str) -> Path:
+    if path is None or str(path).strip() == "":
+        raise ValueError(f"{what} 不能为空：请在 config 中显式提供该路径")
+    resolved = Path(path).expanduser().resolve()
+    if not resolved.is_dir():
+        raise FileNotFoundError(f"{what} 目录不存在：{resolved}")
+    return resolved
 ```
 
 ### 2.2 每一步在做什么
 
 | 操作 | 语法 | 效果 |
 |---|---|---|
-| `Path(root)` | `pathlib.Path` | 把字符串转成路径对象，跨平台兼容（Windows `\` vs Linux `/`） |
+| `Path(path)` | `pathlib.Path` | 把字符串转成路径对象，跨平台兼容（Windows `\` vs Linux `/`） |
 | `.expanduser()` | Path 方法 | 把 `~` 展开成 `/home/vscode` |
 | `.resolve()` | Path 方法 | 把相对路径转成绝对路径，例如 `./data` → `/workspace/vlm_ws/data` |
-| `/` 运算符 | Path 重载的 `/` | 拼接路径：`root_path / "training_videos"` |
 | `.is_dir()` | Path 方法 | 检查这个路径是否存在且是目录 |
 
 ### 2.3 为什么要这样设计
 
-数据集的目录结构有两种常见形态：
+路径全部来自配置，可任意变化而不改代码：
 
-```
-# 形态 A：用户直接指向数据集根目录
-data/Avenue_Dataset/
-    ├── training_videos/
-    └── testing_videos/
-
-# 形态 B：用户指向了上级目录
-data/
-    └── Avenue_Dataset/
-        ├── training_videos/
-        └── testing_videos/
+```yaml
+data:
+  video_path: ./data/Avenue_Dataset/testing_videos   # 必填，缺失直接报错
+  mask_path: ./data/Avenue_Dataset/ground_truth/testing_label_mask  # 可选
 ```
 
-这个函数自动尝试两种可能，无论用户传 `./data` 还是 `./data/Avenue_Dataset` 都能正确找到。这种"容忍多种输入格式"的设计称为 **Robustness 原则**。
+- **`video_path` 缺失** → `_resolve_dir` 抛 `ValueError`，杜绝"路径悄悄错位"。
+- **`mask_path` 缺失** → 该目录下所有视频视为正常视频（帧标签全 0）。
+  这种"显式配置 + 必填校验"的设计称为 **Config-driven 原则**。
 
 ### 2.4 同类设计：`_normalize_split()`
 
@@ -126,14 +123,13 @@ def _normalize_split(split: str) -> Split:
 
 ```python
 def _build_video_records(self) -> list[AvenueVideoRecord]:
-    video_dir = self.root / f"{self.split}_videos"
-    mask_dir  = self.root / f"{self.split}_vol"
+    video_dir = self.video_dir            # 来自配置的 video_path（必填）
     video_paths = sorted(video_dir.glob("*.avi"))
     
     records: list[AvenueVideoRecord] = []
     for video_path in video_paths:
         video_id = video_path.stem       # 文件名去掉后缀
-        mask_path = mask_dir / f"vol{video_id}.mat"
+        mask_path = _find_mask_path(self.mask_dir, video_id)   # {id}_label.mat
         ...
         records.append(AvenueVideoRecord(...))
     return records
@@ -143,11 +139,11 @@ def _build_video_records(self) -> list[AvenueVideoRecord]:
 
 | 操作 | 语法 | 效果 |
 |---|---|---|
-| `f"{self.split}_videos"` | f-string | 生成 `"training_videos"` 或 `"testing_videos"` |
+| `self.video_dir` | 属性 | 配置里的 `video_path`，解析后为绝对目录 |
 | `.glob("*.avi")` | Path 方法 | 匹配目录下所有 `.avi` 文件，返回生成器 |
 | `sorted(...)` | 内置函数 | 排序，保证每次扫描顺序一致（**可复现性的第一步**） |
 | `video_path.stem` | Path 属性 | `01.avi` → `"01"`，即去掉后缀的文件名 |
-| `f"vol{video_id}.mat"` | f-string | 拼接标注文件名：`"vol01.mat"` |
+| `_find_mask_path(...)` | 辅助函数 | 按约定定位 GT：`ground_truth/testing_label_mask/1_label.mat` |
 
 ### 3.3 `AvenueVideoRecord` — 为什么用 `@dataclass(frozen=True)`
 
@@ -157,7 +153,7 @@ class AvenueVideoRecord:
     video_id: str
     split: Split
     video_path: Path
-    mask_path: Path
+    mask_path: Path | None   # 无 GT（mask_dir 未配置）时为 None
     num_frames: int
     fps: float
     frame_height: int
@@ -176,12 +172,14 @@ class AvenueVideoRecord:
 ### 3.4 视频与标注的对应关系
 
 ```
-training_videos/01.avi  ←→  training_vol/vol01.mat
-training_videos/02.avi  ←→  training_vol/vol02.mat
+testing_videos/01.avi  ←→  ground_truth/testing_label_mask/1_label.mat
+testing_videos/02.avi  ←→  ground_truth/testing_label_mask/2_label.mat
         ...                          ...
 ```
 
-Avenue 数据集的命名约定：视频文件叫 `<id>.avi`，对应的像素级标注文件叫 `vol<id>.mat`。代码利用这个约定自动配对。
+Avenue 数据集的命名约定：视频文件叫 `<id>.avi`，对应的官方 GT 二值 mask 文件叫
+`{int(id)}_label.mat`（去掉前导零），放在 `ground_truth/{split}_label_mask/` 下。
+代码利用这个约定自动配对。
 
 ---
 
@@ -244,21 +242,16 @@ finally:
 
 ```python
 def _read_mask_metadata(mask_path: Path) -> tuple[int, int, int]:
-    variables = whosmat(mask_path)
-    for name, shape, _dtype in variables:
-        if name == "vol":
-            mask_height, mask_width, num_frames = shape
-            return int(mask_height), int(mask_width), int(num_frames)
+    data = loadmat(mask_path)          # 读取 .mat 文件
+    volLabel = data["volLabel"]        # (1, N) object 数组，每格一帧 (H, W)
+    num_frames = volLabel.shape[1]
+    height = volLabel[0, 0].shape[0]
+    width  = volLabel[0, 0].shape[1]
+    return int(height), int(width), int(num_frames)
 ```
 
-这里用了 `scipy.io.whosmat()` 而不是 `loadmat()`。
-
-| 函数 | 行为 | 内存占用 |
-|---|---|---|
-| `loadmat()` | 读取 **整个** `.mat` 文件到内存 | 大（几十 MB） |
-| `whosmat()` | 只读取变量名和形状 | 几乎为零 |
-
-**为什么不直接 `loadmat`：** 我们只想确认 mask 的尺寸是否和视频一致，不需要完整内容。这是一种**懒加载（lazy loading）**思想——不到真正需要的时候就不加载。
+这里官方 GT 的变量名是 **`volLabel`**（注意不是 `vol`），形状为 `(1, N)` 的
+object 数组，每一格是一帧 `(H, W)` 的二值 mask。
 
 ---
 
@@ -439,11 +432,12 @@ Avenue 数据集为**测试集**的每一帧提供了像素级标注：
 
 ### 7.2 `.mat` 文件格式
 
-`.mat` 是 MATLAB 的数据文件格式。Avenue 用 `vol` 变量存储 mask 数据，形状为 `(H, W, T)` （高度 × 宽度 × 帧数）。
+`.mat` 是 MATLAB 的数据文件格式。Avenue 官方 GT 用 **`volLabel`** 变量存储 mask 数据，
+形状为 `(1, N)` 的 object 数组，每一格是一帧 `(H, W)` 的二值 mask。
 
 ```python
 # mat 文件内部：
-# vol: [H=360, W=640, T=1000] 的 uint8 数组
+# volLabel: (1, N) object 数组，volLabel[0][i] 是第 i 帧的 (H=360, W=640) uint8 mask
 ```
 
 ### 7.3 加载代码：`_load_mask_volume()`
@@ -452,16 +446,16 @@ Avenue 数据集为**测试集**的每一帧提供了像素级标注：
 @lru_cache(maxsize=8)
 def _load_mask_volume(mask_path: str) -> np.ndarray:
     data = loadmat(mask_path)
-    volume = np.asarray(data["vol"])                  # (H, W, T)
-    binary_volume = (volume > 0).astype(np.float32)   # 二值化
-    return np.transpose(binary_volume, (2, 0, 1))     # (T, H, W)
+    volLabel = data["volLabel"]                       # (1, N) object 数组
+    volume = np.stack([volLabel[0, i] for i in range(volLabel.shape[1])])  # (T, H, W)
+    return (volume > 0).astype(np.float32)            # 0/255 → 0/1
 ```
 
 ### 7.4 逐步解析
 
 **① `loadmat(mask_path)`：**
 
-从 `.mat` 文件读取所有变量，返回一个字典：`{"vol": array(...), "__header__": ..., "__version__": ...}`。
+从 `.mat` 文件读取所有变量，返回一个字典：`{"volLabel": array(...), "__header__": ..., "__version__": ...}`。
 
 **② `(volume > 0).astype(np.float32)`：**
 
@@ -481,15 +475,15 @@ volume > 0  ：
 - **统一标签**：不管原始值是 1 还是 255，都变成 `0.0` 和 `1.0`
 - **类型匹配**：PyTorch 模型输出是 `float32`，mask 也得是 `float32`，否则计算 loss 时报错
 
-**③ `np.transpose(..., (2, 0, 1))`：**
+**③ object 数组展开：**
 
 ```
-MATLAB 格式: (H, W, T) = (360, 640, 1000)
-                     ↓ transpose
-Python 格式:  (T, H, W) = (1000, 360, 640)
+MATLAB 格式: volLabel (1, N) object，每格一帧 (H, W)
+                      ↓ np.stack
+Python 格式:  (T, H, W) = (N, 360, 640)
 ```
 
-为什么？因为我们的视频帧是 `(T, C, H, W)`，mask 用 `(T, H, W)` 后，时间维度对齐，操作更自然。
+时间维度在前，与视频帧 `(T, C, H, W)` 对齐，操作更自然。
 
 ### 7.5 `@lru_cache(maxsize=8)` — 为什么要缓存
 

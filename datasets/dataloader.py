@@ -28,8 +28,9 @@ def seed_worker(worker_id: int) -> None:
 # ═════════════════════════════════════════════════════════════════
 
 def build_video_dataset(
-    root: str | Path,
-    split: str = "training",
+    video_dir: str | Path,
+    mask_dir: str | Path | None = None,
+    split: str = "testing",
     clip_length: int = 16,
     clip_stride: int = 1,
     clip_step: int | None = None,
@@ -38,37 +39,32 @@ def build_video_dataset(
     resize_mask_to_video: bool = False,
     include_last_clip: bool = True,
     pad_short_clips: bool = False,
-    frame_label_mode: str = "pixel",
-    motion_threshold: float = 3.0,
 ) -> VideoDataset:
     """Construct a :class:`VideoDataset`."""
     return VideoDataset(
-        root=root, split=split,
+        video_dir=video_dir, mask_dir=mask_dir, split=split,
         clip_length=clip_length, clip_stride=clip_stride, clip_step=clip_step,
         image_size=image_size, video_backend=video_backend,
         resize_mask_to_video=resize_mask_to_video,
         include_last_clip=include_last_clip, pad_short_clips=pad_short_clips,
-        frame_label_mode=frame_label_mode, motion_threshold=motion_threshold,
     )
 
 
 def build_video_dataloader(
-    root: str | Path,
-    split: str = "training",
+    video_dir: str | Path,
+    mask_dir: str | Path | None = None,
+    split: str = "testing",
     batch_size: int = 4,
     shuffle: bool = True,
     num_workers: int = 0,
     pin_memory: bool = True,
     drop_last: bool = False,
     seed: int | None = None,
-    frame_label_mode: str = "pixel",
-    motion_threshold: float = 3.0,
     **dataset_kwargs: Any,
 ) -> DataLoader:
     """Build a DataLoader for :class:`VideoDataset`."""
     dataset = build_video_dataset(
-        root=root, split=split,
-        frame_label_mode=frame_label_mode, motion_threshold=motion_threshold,
+        video_dir=video_dir, mask_dir=mask_dir, split=split,
         **dataset_kwargs,
     )
 
@@ -95,8 +91,9 @@ def build_video_dataloader(
 
 def build_feature_dataset(
     feature_dir: str | Path,
-    root: str | Path,
-    split: str = "training",
+    video_dir: str | Path,
+    mask_dir: str | Path | None = None,
+    split: str = "testing",
     clip_length: int = 16,
     clip_stride: int = 1,
     clip_step: int | None = None,
@@ -104,21 +101,22 @@ def build_feature_dataset(
     pad_short_clips: bool = False,
     preload: bool = True,
     allow_missing: bool = False,
-    label_dir: str | Path | None = None,
 ) -> FeatureDataset:
     """Construct a :class:`FeatureDataset`."""
     return FeatureDataset(
-        feature_dir=feature_dir, root=root, split=split,
+        feature_dir=feature_dir, video_dir=video_dir, mask_dir=mask_dir,
+        split=split,
         clip_length=clip_length, clip_stride=clip_stride, clip_step=clip_step,
         include_last_clip=include_last_clip, pad_short_clips=pad_short_clips,
-        preload=preload, allow_missing=allow_missing, label_dir=label_dir,
+        preload=preload, allow_missing=allow_missing,
     )
 
 
 def build_feature_dataloader(
     feature_dir: str | Path,
-    root: str | Path,
-    split: str = "training",
+    video_dir: str | Path,
+    mask_dir: str | Path | None = None,
+    split: str = "testing",
     batch_size: int = 4,
     shuffle: bool = True,
     num_workers: int = 0,
@@ -126,13 +124,13 @@ def build_feature_dataloader(
     drop_last: bool = False,
     seed: int | None = None,
     allow_missing: bool = False,
-    label_dir: str | Path | None = None,
     **dataset_kwargs: Any,
 ) -> DataLoader:
     """Build a DataLoader for :class:`FeatureDataset`."""
     dataset = build_feature_dataset(
-        feature_dir=feature_dir, root=root, split=split,
-        allow_missing=allow_missing, label_dir=label_dir, **dataset_kwargs,
+        feature_dir=feature_dir, video_dir=video_dir, mask_dir=mask_dir,
+        split=split,
+        allow_missing=allow_missing, **dataset_kwargs,
     )
 
     generator = None

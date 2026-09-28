@@ -33,6 +33,21 @@ def _feature_dir_exists(data_cfg: DictConfig, split: str) -> bool:
     return (Path(fd) / split).is_dir()
 
 
+def _require_video_path(data_cfg: DictConfig) -> str:
+    """读取 data.video_path 并校验非空（必填）。
+
+    Raises:
+        ValueError: 配置里没有填写 video_path 时。
+    """
+    video_path = data_cfg.get("video_path", None)
+    if video_path is None or str(video_path).strip() == "":
+        raise ValueError(
+            "config.data.video_path 未填写：请显式提供视频目录路径，"
+            "例如 ./data/Avenue_Dataset/testing_videos。"
+        )
+    return str(video_path)
+
+
 def build_split_dataloader(
     data_cfg: DictConfig,
     split: str,
@@ -51,7 +66,10 @@ def build_split_dataloader(
         (dataloader, source_type)，source_type ∈ {"feature", "video"}，
         供上层决定走 forward_from_visual 还是 forward。
     """
-    root = str(data_cfg.root)
+    video_path = _require_video_path(data_cfg)
+    mask_path = (
+        str(data_cfg.mask_path) if data_cfg.get("mask_path", None) is not None else None
+    )
     common = dict(
         clip_length=int(data_cfg.get("clip_length", 16)),
         clip_stride=int(data_cfg.get("clip_stride", 1)),
@@ -67,23 +85,21 @@ def build_split_dataloader(
         feature_dir = Path(data_cfg.feature_dir) / split
         loader = build_feature_dataloader(
             feature_dir=feature_dir,
-            root=root,
+            video_dir=video_path,
+            mask_dir=mask_path,
             split=split,
             batch_size=int(data_cfg.get("batch_size", 2)),
             shuffle=shuffle,
             num_workers=int(data_cfg.get("num_workers", 0)),
             seed=seed,
             allow_missing=bool(data_cfg.get("allow_missing", False)),
-            label_dir=(
-                Path(data_cfg.label_dir) / split
-                if data_cfg.get("label_dir", None) is not None else None
-            ),
             **common,
         )
         return loader, "feature"
 
     loader = build_video_dataloader(
-        root=root,
+        video_dir=video_path,
+        mask_dir=mask_path,
         split=split,
         batch_size=int(data_cfg.get("batch_size", 2)),
         shuffle=shuffle,
@@ -91,8 +107,6 @@ def build_split_dataloader(
         seed=seed,
         image_size=tuple(data_cfg.get("image_size", (224, 224))),
         video_backend=str(data_cfg.get("video_backend", "auto")),
-        frame_label_mode=str(data_cfg.get("frame_label_mode", "pixel")),
-        motion_threshold=float(data_cfg.get("motion_threshold", 3.0)),
         **common,
     )
     return loader, "video"

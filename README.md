@@ -49,27 +49,28 @@ python train.py --config configs/experiment.yaml --resume ./checkpoints/exp01/la
 
 ```bash
 # 1. 离线提取所有视频帧的 CLIP 特征（一次性）
-python tools/extract_video_features.py --root ./data --split training --out ./data/features/training
-python tools/extract_video_features.py --root ./data --split testing  --out ./data/features/testing
+python tools/extract_video_features.py --video-dir ./data/Avenue_Dataset/testing_videos \
+    --mask-dir ./data/Avenue_Dataset/ground_truth/testing_label_mask \
+    --out ./data/features/testing
 
-# 2. 提取运动伪标签（frame_label_mode=motion_diff 时需要）
-python tools/extract_motion_labels.py --root ./data --split testing --out ./data/labels
-
-# 3. 在 config 里设置 use_feature: true 即可自动走 FeatureDataset
+# 2. 在 config 里设置 use_feature: true 即可自动走 FeatureDataset
 ```
 
 > 实验对比（prompt ablation / fusion 对比 / backbone 互换）**全部改 yaml 即可**，无需改代码：
 > 见 `configs/prompts.yaml`（prompt 词汇表）与 `configs/experiment.yaml`（`model.fusion.type` / `model.backbone.name`）。
 
-### ⚠️ 关于 Avenue 数据集标注（重要）
+### ⚠️ 关于数据集路径与 GT 标注（重要）
 
-本仓库 `data/Avenue_Dataset/*_vol/*.mat` 中的 `vol` 变量经检测**实际是降采样的灰度视频帧，
-而不是二值异常 mask**（与视频帧相关系数 ≈ 0.999）。因此：
+数据路径由 `configs/experiment.yaml` 的 `data.video_path` / `data.mask_path` 显式控制，
+不再写死 `training_videos` / `testing_videos`：
 
-- 若你持有**官方二值 mask**：保持 `frame_label_mode: pixel`（默认），即可直接训练/评估。
-- 若使用本仓库自带数据：请把配置改为 `frame_label_mode: motion_diff`（基于帧间差的运动伪标签，
-  VAD 经典 baseline 之一，仅用于跑通流程，**学术结论请使用真实 mask**）。
-- 代码会自动检测可疑 mask 并在日志里提醒（`datasets/video_dataset.py: mask_looks_like_frames`）。
+- **`video_path`（必填）**：视频目录。未填写 → 直接报错。
+- **`mask_path`（可选）**：GT 二值 mask 目录（如 `ground_truth/testing_label_mask`）。
+  **未填写 → 该目录下所有视频视为正常视频**（帧标签全 0，配合 loss 的
+  `skip_bce_when_no_pos` 做无监督训练）。
+- mask 文件命名约定：与视频 stem 匹配，优先 `{stem}_label.mat`，其次 `{stem}.mat`；
+  mat 文件内变量名为 **`volLabel`**（不是 `vol`），形状为 `(1, N)` 的 object 数组，
+  每格一帧 `(H, W)` 二值 mask。
 
 ### GPU 主机
 
@@ -100,8 +101,9 @@ data/
 └── Avenue_Dataset/          # 从官网下载后解压到这里
     ├── training_videos/     # 16 个训练视频 (.avi)
     ├── testing_videos/      # 21 个测试视频 (.avi)
-    ├── training_vol/        # 16 个像素级标注 (.mat)
-    └── testing_vol/         # 21 个像素级标注 (.mat)
+    └── ground_truth/
+        ├── testing_label_mask/   # 21 个官方 GT 二值 mask ({id}_label.mat, 变量 volLabel)
+        └── ...
 ```
 
 > 数据集文件被 `.gitignore` 排除，不会提交到仓库。
@@ -125,7 +127,7 @@ vlm_ws/
 │   ├── avenue_dataset.py    # Avenue 数据集类
 │   └── dataloader.py        # DataLoader 工厂函数
 ├── datasets/                # 新数据模块（推荐）
-│   ├── video_dataset.py     # 原始像素 Dataset（支持 pixel / motion_diff 标签）
+│   ├── video_dataset.py     # 原始像素 Dataset（官方 GT volLabel mask）
 │   ├── feature_dataset.py   # 预提取特征 Dataset（训练提速 ~10×）
 │   ├── dataloader.py        # DataLoader 工厂函数
 │   └── builders.py          # 配置驱动：自动选 Video/Feature 路径
@@ -144,10 +146,9 @@ vlm_ws/
 │   ├── io.py                # checkpoint / JSON 读写
 │   ├── config.py            # 配置加载（experiment + prompts 合并）
 │   └── visualization.py     # 时序热力图 / prompt 相似度 / attention
-├── tools/                   # 离线特征与标签提取脚本
+├── tools/                   # 离线特征提取脚本
 │   ├── extract_video_features.py
-│   ├── extract_text_features.py
-│   └── extract_motion_labels.py
+│   └── extract_text_features.py
 ├── train.py                 # 训练入口（配置驱动，一条命令闭环）
 ├── eval.py                  # 评估入口（加载 checkpoint 出指标+解释+图）
 ├── configs/                 # 实验配置文件

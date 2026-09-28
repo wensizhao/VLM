@@ -13,18 +13,11 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 from decord import VideoReader
-from scipy.io import loadmat, whosmat
+from scipy.io import loadmat
 from torch.utils.data import Dataset
 
 VideoBackend = Literal["auto", "decord", "opencv"]
 Split = Literal["training", "testing"]
-FrameLabelMode = Literal["pixel", "motion_diff"]
-
-# 已提醒过的"可疑 mask"视频 id（避免每个 clip 都刷一次 warning）
-_WARNED_SUSPECT_MASKS: set[str] = set()
-
-
-# ═════════════════════════════════════════════════════════════════
 # Metadata records
 # ═════════════════════════════════════════════════════════════════
 
@@ -35,7 +28,7 @@ class VideoRecord:
     video_id: str
     split: Split
     video_path: Path
-    mask_path: Path
+    mask_path: Path | None  # 该视频的 GT mask；未配置/不存在时为 None（正常视频）
     num_frames: int
     fps: float
     frame_height: int
@@ -65,17 +58,43 @@ def _normalize_split(split: str) -> Split:
     raise ValueError(f"Unsupported split: {split!r}")
 
 
-def _resolve_avenue_root(root: str | Path) -> Path:
-    root_path = Path(root).expanduser().resolve()
-    if (root_path / "training_videos").is_dir():
-        return root_path
-    nested = root_path / "Avenue_Dataset"
-    if (nested / "training_videos").is_dir():
-        return nested
-    raise FileNotFoundError(
-        f"Could not locate Avenue dataset under {root_path}. "
-        f"Expected training_videos/testing_videos directories."
-    )
+def _resolve_dir(path: str | Path, what: str) -> Path:
+    """把配置里的路径转成绝对路径，并校验目录存在。
+
+    Args:
+        path: 配置给出的目录路径（绝对或相对 cwd）。
+        what: 出错信息里的名称（如 video_path / mask_path）。
+
+    Returns:
+        解析后的绝对路径。
+    """
+    if path is None or str(path).strip() == "":
+        raise ValueError(
+            f"{what} 不能为空：请在 config 中显式提供该路径"
+        )
+    resolved = Path(path).expanduser().resolve()
+    if not resolved.is_dir():
+        raise FileNotFoundError(f"{what} 目录不存在：{resolved}")
+    return resolved
+
+
+def _find_mask_path(mask_dir: Path | None, video_id: str) -> Path | None:
+    """在 mask 目录里找视频对应的 GT mask 文件。
+
+    约定（可自行调整命名）：``video 01.avi`` ↔ ``1_label.mat`` 或 ``01_label.mat``。
+    匹配顺序：``{video_id}_label.mat`` → ``{int(video_id)}_label.mat``。
+    找不到（含 mask_dir 未配置）→ 返回 None，表示该视频为正常视频。
+    """
+    if mask_dir is None:
+        return None
+    stems = [video_id]
+    if video_id.isdigit():
+        stems.append(str(int(video_id)))
+    for stem in stems:
+        candidate = mask_dir / f"{stem}_label.mat"
+        if candidate.is_file():
+            return candidate
+    return None
 
 
 def _read_video_metadata(video_path: Path) -> tuple[int, float, int, int]:
@@ -93,77 +112,49 @@ def _read_video_metadata(video_path: Path) -> tuple[int, float, int, int]:
         raise RuntimeError(f"Video has no readable frames: {video_path}")
     return n, fps, h, w
 
-
 def _read_mask_metadata(mask_path: Path) -> tuple[int, int, int]:
-    for name, shape, _ in whosmat(mask_path):
-        if name == "vol":
-            if len(shape) != 3:
-                raise RuntimeError(
-                    f"Expected 'vol' to have 3 dims in {mask_path}, got {shape}"
-                )
-            return int(shape[0]), int(shape[1]), int(shape[2])
-    raise KeyError(f"Could not find 'vol' variable in {mask_path}")
+    data = loadmat(mask_path)
 
+    # 检查变量名
+    if "volLabel" not in data:
+        raise KeyError(f"Could not find 'volLabel' variable in {mask_path}")
+    
+    volLabel = data["volLabel"]
+    
+    # 检查数据结构
+    if volLabel.ndim != 2 or volLabel.shape[0] != 1:
+        raise RuntimeError(
+            f"Expected volLabel to have shape (1, N), got {volLabel.shape}"
+        )
+    
+    # 获取帧数、高度、宽度
+    num_frames = volLabel.shape[1]
+    height = volLabel[0, 0].shape[0]  # 第一帧的高度
+    width = volLabel[0, 0].shape[1]   # 第一帧的宽度
+    
+    # 验证所有帧的尺寸一致
+    for i in range(1, min(num_frames, 10)):  # 检查前10帧
+        frame = volLabel[0, i]
+        if frame.shape != (height, width):
+            raise RuntimeError(
+                f"Inconsistent frame sizes in {mask_path}: "
+                f"frame 0 is {height}x{width}, frame {i} is {frame.shape}"
+            )
+    
+    return height, width, num_frames
 
 @lru_cache(maxsize=8)
 def _load_mask_volume(mask_path: str) -> np.ndarray:
     data = loadmat(mask_path)
-    if "vol" not in data:
-        raise KeyError(f"Could not find 'vol' variable in {mask_path}")
-    volume = np.asarray(data["vol"])
-    if volume.ndim != 3:
-        raise RuntimeError(f"Expected 'vol' to have 3 dims, got {volume.shape}")
+    if "volLabel" not in data:
+        raise KeyError(f"Could not find 'volLabel' variable in {mask_path}")
 
-    # 在二值化之前检测：某些数据包的 vol 实为灰度视频帧而非 mask
-    if mask_path not in _WARNED_SUSPECT_MASKS and mask_looks_like_frames(volume):
-        _WARNED_SUSPECT_MASKS.add(mask_path)
-        import logging
-        logging.getLogger(__name__).warning(
-            "Mask %s looks like grayscale frames (not a binary mask). "
-            "Set frame_label_mode='motion_diff' or download the real masks.",
-            mask_path,
-        )
+    volLabel = data["volLabel"]
+    # 将object数组转换为3D数组 (T, H, W)
+    volume = np.stack([volLabel[0, i] for i in range(volLabel.shape[1])])
 
-    binary = (volume > 0).astype(np.float32)
-    return np.transpose(binary, (2, 0, 1))  # (H, W, T) → (T, H, W)
-
-
-def mask_looks_like_frames(volume: np.ndarray) -> bool:
-    """启发式检测：某些 Avenue 数据包把"灰度视频帧"误存成了 vol 变量。
-
-    判断依据（两个特征同时成立则高度可疑）：
-        1. 几乎所有像素都非零（帧是连续的灰度值，真 mask 大部分是 0）
-        2. 值域很宽且连续（真 mask 只有 0 / 255 两个值）
-
-    用户遇到此情况应：
-        a) 重新下载官方 binary mask；或
-        b) 设置 ``frame_label_mode: motion_diff`` 用运动伪标签跑通流程。
-    """
-    flat = volume.reshape(-1)
-    if flat.size == 0:
-        return False
-    nonzero_frac = float((flat > 0).mean())
-    # 帧图像是 uint8 灰度（~上百个不同值）；真二值 mask 只有 2 个值
-    unique_frac = float(np.unique(flat).size) / min(flat.size, 1_000_000)
-    return nonzero_frac > 0.99 and unique_frac > 1e-4
-
-
-def _compute_motion_labels(frames: np.ndarray, threshold: float) -> np.ndarray:
-    """基于帧间差的运动伪标签（classic motion-based VAD baseline）。
-
-    数学：帧间运动强度 = 相邻两帧灰度图的平均绝对差（Mean Absolute Difference）：
-        motion_t = (1/HW) · Σ_{i,j} |I_t(i,j) - I_{t-1}(i,j)|
-    异常通常伴随剧烈运动（投掷、奔跑、打架），所以
-        label_t = 1[motion_t > threshold]
-    第一帧没有前帧，用第二帧的 motion 补齐。
-
-    注意：这是一个**基准近似**（pseudo label），学术结论请使用真实的
-    pixel mask（frame_label_mode="pixel"）。
-    """
-    gray = frames.mean(axis=-1).astype(np.float32)          # (T, H, W) in [0,255]
-    diff = np.abs(np.diff(gray, axis=0)).mean(axis=(1, 2))  # (T-1,)
-    motion = np.concatenate([[diff[0]], diff])              # (T,)
-    return (motion > threshold).astype(np.int64)
+    # 官方 GT 是二值 mask（0/255）→ 归一化成 0/1
+    return (volume > 0).astype(np.float32)  # (T, H, W)
 
 
 def _compute_clip_starts(
@@ -207,19 +198,27 @@ def _read_frames_opencv(video_path: Path, indices: np.ndarray) -> np.ndarray:
     cap = cv2.VideoCapture(str(video_path))
     if not cap.isOpened():
         raise RuntimeError(f"Failed to open video: {video_path}")
-    frames: list[np.ndarray] = []
-    cursor = -1
+    
+    frames: list[np.ndarray] =[]
+    current_pos = -1 
+    
     try:
-        for idx in indices:
-            if cursor != int(idx):
-                cap.set(cv2.CAP_PROP_POS_FRAMES, int(idx))
+        for target_frame in indices:
+            if current_pos != target_frame:
+                cap.set(cv2.CAP_PROP_POS_FRAMES, target_frame)
+                current_pos = target_frame 
+            
+            #（cap.read() 会自动移动到下一帧
             ok, frame = cap.read()
-            if not ok or frame is None:
-                raise RuntimeError(f"Failed to read frame {int(idx)} from {video_path}")
+            if not ok:
+                raise RuntimeError(f"Failed to read frame {target_frame}")
+            
             frames.append(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
-            cursor = int(idx) + 1
+            current_pos += 1  
+            
     finally:
         cap.release()
+    
     return np.stack(frames, axis=0)
 
 
@@ -243,8 +242,9 @@ class VideoDataset(Dataset[dict[str, Any]]):
 
     def __init__(
         self,
-        root: str | Path,
-        split: str = "training",
+        video_dir: str | Path,
+        mask_dir: str | Path | None = None,
+        split: str = "testing",
         clip_length: int = 16,
         clip_stride: int = 1,
         clip_step: int | None = None,
@@ -253,8 +253,6 @@ class VideoDataset(Dataset[dict[str, Any]]):
         resize_mask_to_video: bool = False,
         include_last_clip: bool = True,
         pad_short_clips: bool = False,
-        frame_label_mode: FrameLabelMode = "pixel",
-        motion_threshold: float = 3.0,
     ) -> None:
         if clip_length <= 0:
             raise ValueError("clip_length must be positive")
@@ -268,27 +266,27 @@ class VideoDataset(Dataset[dict[str, Any]]):
             raise ValueError("image_size must be a (height, width) tuple")
         if video_backend not in {"auto", "decord", "opencv"}:
             raise ValueError(f"Unsupported video_backend: {video_backend!r}")
-        if frame_label_mode not in {"pixel", "motion_diff"}:
-            raise ValueError(
-                f"Unsupported frame_label_mode: {frame_label_mode!r} "
-                "(expected 'pixel' or 'motion_diff')"
-            )
 
-        self.root = _resolve_avenue_root(root)
+        # video_dir 必填：未提供直接报错；mask_dir 可选：未提供 = 全正常视频
+        self.video_dir = _resolve_dir(video_dir, "video_path")
+        self.mask_dir = (
+            _resolve_dir(mask_dir, "mask_path")
+            if mask_dir is not None and str(mask_dir).strip() != ""
+            else None
+        )
         self.split = _normalize_split(split)
         self.clip_length = clip_length
         self.clip_stride = clip_stride
         self.clip_step = clip_step if clip_step is not None else clip_length
         self.image_size = image_size
         self.video_backend = video_backend
-        self.resize_mask_to_video = resize_mask_to_video
-        self.include_last_clip = include_last_clip
-        self.pad_short_clips = pad_short_clips
-        self.frame_label_mode = frame_label_mode
-        self.motion_threshold = motion_threshold
+        self.resize_mask_to_video = resize_mask_to_video  # 调整标注 mask 到视频尺寸
+        self.include_last_clip = include_last_clip        # 是否包含最后一个不完整的 clip
+        self.pad_short_clips = pad_short_clips            # 是否填充短于 clip 长度的视频
 
-        self.video_records = self._build_video_records()
-        self.clip_records = self._build_clip_records()
+        # 构建视频和剪辑的元数据索引
+        self.video_records = self._build_video_records()   # 视频元数据列表
+        self.clip_records = self._build_clip_records()     # 剪辑元数据列表
 
         if not self.clip_records:
             raise RuntimeError(
@@ -299,25 +297,25 @@ class VideoDataset(Dataset[dict[str, Any]]):
     # ── Build indices ─────────────────────────────────────────
 
     def _build_video_records(self) -> list[VideoRecord]:
-        video_dir = self.root / f"{self.split}_videos"
-        mask_dir = self.root / f"{self.split}_vol"
-        video_paths = sorted(video_dir.glob("*.avi"))
+        # 从显式配置的 video_dir 扫描视频；mask_dir 可选。
+        # mask_dir 未配置（或某个视频没有对应 mask 文件）→ 该视频视为正常视频。
+        video_paths = sorted(self.video_dir.glob("*.avi"))
         if not video_paths:
-            raise FileNotFoundError(f"No AVI videos found in {video_dir}")
+            raise FileNotFoundError(f"No AVI videos found in {self.video_dir}")
 
         records: list[VideoRecord] = []
         for vp in video_paths:
             vid = vp.stem
-            mp = mask_dir / f"vol{vid}.mat"
-            if not mp.is_file():
-                raise FileNotFoundError(f"Missing annotation: {mp.name}")
-
             n, fps, fh, fw = _read_video_metadata(vp)
-            mh, mw, mf = _read_mask_metadata(mp)
-            if n != mf:
-                raise RuntimeError(
-                    f"Frame count mismatch: {vp.name}={n}, {mp.name}={mf}"
-                )
+            mp = _find_mask_path(self.mask_dir, vid)
+            if mp is not None:
+                mh, mw, mf = _read_mask_metadata(mp)
+                if n != mf:
+                    raise RuntimeError(
+                        f"Frame count mismatch: {vp.name}={n}, {mp.name}={mf}"
+                    )
+            else:
+                mh, mw, mf = fh, fw, n
             records.append(VideoRecord(
                 video_id=vid, split=self.split, video_path=vp, mask_path=mp,
                 num_frames=n, fps=fps, frame_height=fh, frame_width=fw,
@@ -367,17 +365,14 @@ class VideoDataset(Dataset[dict[str, Any]]):
             video = F.interpolate(video, size=self.image_size,
                                   mode="bilinear", align_corners=False)
 
-        mask_vol = _load_mask_volume(str(vr.mask_path))                # (T_m, H, W)
-        if self.frame_label_mode == "pixel":
-            # 可疑 mask（实为视频帧）的提醒已在 _load_mask_volume 内完成
+        if vr.mask_path is None:
+            # 无 GT mask（mask_dir 未配置或该视频无 mask 文件）→ 视为正常视频
+            frame_label = torch.zeros(len(indices), dtype=torch.long)
+            clip_masks = frame_label.unsqueeze(1).float()  # (T, 1) 占位
+        else:
+            mask_vol = _load_mask_volume(str(vr.mask_path))            # (T_m, H, W)
             clip_masks = torch.from_numpy(mask_vol[indices].copy()).to(torch.float32)
             frame_label = (clip_masks.flatten(1).amax(dim=1) > 0).to(torch.long)
-        else:  # motion_diff —— 基于帧间差的运动伪标签
-            frame_label = torch.from_numpy(
-                _compute_motion_labels(raw, self.motion_threshold)
-            )
-            # 无像素级标注：pixel_mask 退化为帧标签占位，保持返回 dict 结构一致
-            clip_masks = frame_label.unsqueeze(1).float()  # (T, 1)
 
         if self.resize_mask_to_video and self.image_size is not None:
             clip_masks = F.interpolate(

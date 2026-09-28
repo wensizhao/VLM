@@ -26,9 +26,11 @@ from .video_dataset import (
     VideoRecord,
     _build_frame_indices,
     _compute_clip_starts,
+    _find_mask_path,
     _load_mask_volume,
     _normalize_split,
-    _resolve_avenue_root,
+    _read_mask_metadata,
+    _resolve_dir,
 )
 
 
@@ -63,8 +65,9 @@ class FeatureDataset(Dataset[dict[str, Any]]):
     def __init__(
         self,
         feature_dir: str | Path,
-        root: str | Path,
-        split: str = "training",
+        video_dir: str | Path,
+        mask_dir: str | Path | None = None,
+        split: str = "testing",
         clip_length: int = 16,
         clip_stride: int = 1,
         clip_step: int | None = None,
@@ -72,14 +75,14 @@ class FeatureDataset(Dataset[dict[str, Any]]):
         pad_short_clips: bool = False,
         preload: bool = True,
         allow_missing: bool = False,
-        label_dir: str | Path | None = None,
     ) -> None:
         """初始化 FeatureDataset。
 
         Args:
             feature_dir: 提取好的 .pt 特征文件目录。
-            root: Avenue 数据集根目录（用于读取 mask 标注）。
-            split: training 或 testing。
+            video_dir: 视频目录（必填，未提供直接报错）。
+            mask_dir: GT mask 目录（可选；未提供 = 全正常视频）。
+            split: training 或 testing（仅作记录标签）。
             clip_length / clip_stride / clip_step: clip 切片参数，
                 与 VideoDataset 保持一致。
             include_last_clip / pad_short_clips: 同 VideoDataset。
@@ -87,16 +90,18 @@ class FeatureDataset(Dataset[dict[str, Any]]):
                 False 时按需读取（内存紧张时用）。
             allow_missing: True 时跳过没有对应 .pt 特征文件的视频
                 （支持"只提取了一部分视频"的场景，如冒烟测试/增量提取）。
-            label_dir: 可选——预计算的帧级标签目录 {label_dir}/{video_id}.pt。
-                用于无法从特征反推标签、且真实 pixel mask 不可用时的
-                运动伪标签路径（配合 tools/extract_motion_labels.py）。
         """
         if clip_length <= 0:
             raise ValueError("clip_length must be positive")
         if clip_stride <= 0:
             raise ValueError("clip_stride must be positive")
 
-        self.root = _resolve_avenue_root(root)
+        self.video_dir = _resolve_dir(video_dir, "video_dir / video_path")
+        self.mask_dir = (
+            _resolve_dir(mask_dir, "mask_dir / mask_path")
+            if mask_dir is not None and str(mask_dir).strip() != ""
+            else None
+        )
         self.split = _normalize_split(split)
         self.feature_dir = Path(feature_dir)
         self.clip_length = clip_length
@@ -106,7 +111,6 @@ class FeatureDataset(Dataset[dict[str, Any]]):
         self.pad_short_clips = pad_short_clips
         self.preload = preload
         self.allow_missing = allow_missing
-        self.label_dir = Path(label_dir) if label_dir is not None else None
 
         # 构建与 VideoDataset 完全相同的视频索引和 clip 索引
         self.video_records = self._build_video_records()
@@ -134,27 +138,25 @@ class FeatureDataset(Dataset[dict[str, Any]]):
     # ── Build indices (mirrors VideoDataset) ──────────────────
 
     def _build_video_records(self) -> list[VideoRecord]:
-        from .video_dataset import _read_video_metadata, _read_mask_metadata
+        from .video_dataset import _read_video_metadata
 
-        video_dir = self.root / f"{self.split}_videos"
-        mask_dir = self.root / f"{self.split}_vol"
-        video_paths = sorted(video_dir.glob("*.avi"))
+        video_paths = sorted(self.video_dir.glob("*.avi"))
         if not video_paths:
-            raise FileNotFoundError(f"No AVI videos found in {video_dir}")
+            raise FileNotFoundError(f"No AVI videos found in {self.video_dir}")
 
         records: list[VideoRecord] = []
         for vp in video_paths:
             vid = vp.stem
-            mp = mask_dir / f"vol{vid}.mat"
-            if not mp.is_file():
-                raise FileNotFoundError(f"Missing annotation: {mp.name}")
-
             n, fps, fh, fw = _read_video_metadata(vp)
-            mh, mw, mf = _read_mask_metadata(mp)
-            if n != mf:
-                raise RuntimeError(
-                    f"Frame count mismatch: {vp.name}={n}, {mp.name}={mf}"
-                )
+            mp = _find_mask_path(self.mask_dir, vid)
+            if mp is not None:
+                mh, mw, mf = _read_mask_metadata(mp)
+                if n != mf:
+                    raise RuntimeError(
+                        f"Frame count mismatch: {vp.name}={n}, {mp.name}={mf}"
+                    )
+            else:
+                mh, mw, mf = fh, fw, n
             records.append(VideoRecord(
                 video_id=vid, split=self.split, video_path=vp, mask_path=mp,
                 num_frames=n, fps=fps, frame_height=fh, frame_width=fw,
@@ -241,16 +243,9 @@ class FeatureDataset(Dataset[dict[str, Any]]):
         feat = self._resolve_feature(vr.video_id)
         vis_feat = feat[indices]   # (T, D) — 直接就是 CLIP 编码后的特征
 
-        # 标注 —— 优先用预计算标签文件，否则用像素 mask
-        if self.label_dir is not None:
-            label_path = self.label_dir / f"{vr.video_id}.pt"
-            if not label_path.is_file():
-                raise FileNotFoundError(
-                    f"Label file not found: {label_path}. "
-                    f"Run tools/extract_motion_labels.py first."
-                )
-            labels = torch.load(label_path, map_location="cpu", weights_only=True)
-            frame_label = labels[indices].to(torch.long)
+        # 标注 —— 用 GT 二值 mask；mask 缺失 → 该视频为正常视频（全 0）
+        if vr.mask_path is None:
+            frame_label = torch.zeros(len(indices), dtype=torch.long)
             clip_masks = frame_label.unsqueeze(1).float()  # (T, 1) 占位
         else:
             mask_vol = _load_mask_volume(str(vr.mask_path))
