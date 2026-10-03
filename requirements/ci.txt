@@ -1,0 +1,4 @@
+# CI 专用依赖：跑 tests/ 冒烟测试（不含 jupyterlab 等开发工具）。
+# torch/torchvision 由 CI 步骤先从 CPU 源安装，见 .github/workflows/ci.yml。
+-r base.txt
+pytest==8.2.2

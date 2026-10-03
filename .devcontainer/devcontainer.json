@@ -1,0 +1,31 @@
+{
+  "name": "vlm-ws",
+  "dockerComposeFile": [
+    "../docker-compose.yml"
+  ],
+  "service": "vlm-dev",
+  "workspaceFolder": "/workspace/vlm_ws",
+  "shutdownAction": "stopCompose",
+  "overrideCommand": false,
+  "remoteEnv": {
+    "SHELL": "/usr/bin/zsh"
+  },
+  "customizations": {
+    "vscode": {
+      "settings": {
+        "terminal.integrated.defaultProfile.linux": "zsh",
+        "terminal.integrated.profiles.linux": {
+          "zsh": {
+            "path": "/usr/bin/zsh"
+          }
+        }
+      },
+      "extensions": [
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "ms-toolsai.jupyter",
+        "redhat.vscode-yaml"
+      ]
+    }
+  }
+}

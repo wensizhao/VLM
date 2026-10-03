@@ -1,0 +1,72 @@
+# ── Python bytecode & build ──────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+*.egg
+dist/
+build/
+
+# ── Virtual environments ────────────────────────────────────
+.venv/
+venv/
+env/
+*.conda
+
+# ── Environment & secrets ───────────────────────────────────
+.env
+*.secret
+*.key
+
+# ── Jupyter ─────────────────────────────────────────────────
+.ipynb_checkpoints/
+*.ipynb
+
+# ── Dataset (large binary files — download separately) ──────
+data/Avenue_Dataset/
+
+# ── Runtime outputs (keep dirs via .gitkeep) ────────────────
+checkpoints/*
+!checkpoints/.gitkeep
+logs/*
+!logs/.gitkeep
+results/*
+!results/.gitkeep
+# configs are the experiment contract — keep them tracked for reproducibility
+!configs/*.yaml
+
+# ── Model weights ───────────────────────────────────────────
+*.pt
+*.pth
+*.ckpt
+*.bin
+*.safetensors
+
+# ── Caches ──────────────────────────────────────────────────
+.cache/
+*.log
+wandb/
+
+# ── TensorBoard ─────────────────────────────────────────────
+runs/
+
+# ── OS files ────────────────────────────────────────────────
+.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
+ehthumbs.db
+
+# ── Editors / IDEs ──────────────────────────────────────────
+.idea/
+*.swp
+
+# ── Node（本仓库为 Python 项目；防止工具误生成 lockfile）────────
+package-lock.json
+node_modules/
+*.swo
+*~
+.vscode/
+.directory

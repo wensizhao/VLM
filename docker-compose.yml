@@ -1,0 +1,55 @@
+services:
+  vlm-dev:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        BASE_IMAGE: "${BASE_IMAGE:-pytorch/pytorch:2.3.1-cuda12.1-cudnn8-runtime}"
+        INSTALL_OPTIONAL_SHELL_TOOLS: "1"
+    image: vlm-ws:dev
+    container_name: vlm-ws-dev
+    user: "${LOCAL_UID:-1000}:${LOCAL_GID:-1000}"
+    working_dir: /workspace/vlm_ws
+    stdin_open: true
+    tty: true
+    ipc: host
+    shm_size: "${SHM_SIZE:-16gb}"
+    environment:
+      TZ: "${TZ:-Asia/Shanghai}"
+      HOME: /tmp/devhome
+      SHELL: /usr/bin/zsh
+      WORKSPACE_DIR: /workspace/vlm_ws
+      PYTHONPATH: /workspace/vlm_ws
+      MPLCONFIGDIR: /tmp/devhome/.config/matplotlib
+      PIP_CACHE_DIR: /tmp/devhome/.cache/pip
+      HF_HOME: /tmp/devhome/.cache/huggingface
+      TRANSFORMERS_CACHE: /tmp/devhome/.cache/huggingface/transformers
+      TORCH_HOME: /tmp/devhome/.cache/torch
+      http_proxy: ""
+      https_proxy: ""
+      no_proxy: ""
+      HTTP_PROXY: ""
+      HTTPS_PROXY: ""
+      NO_PROXY: ""
+      
+    volumes:
+      - .:/workspace/vlm_ws
+      - dev-home:/tmp/devhome
+      # Reuse the host opencode configuration (providers, models, agents, skills,
+      # AGENTS.md) without rebuilding the image.
+      - ${HOST_OPENCODE_CONFIG:-${HOME}/.config/opencode}:/tmp/devhome/.config/opencode
+      # Reuse host credentials so `opencode` is already logged in. The host file
+      # is staged read-only outside $HOME; the entrypoint copies it into the
+      # container-local data dir (a bind-mounted file would leave a root-owned
+      # parent directory behind, which the unprivileged user cannot write to).
+      - ${HOST_OPENCODE_AUTH:-${HOME}/.local/share/opencode/auth.json}:/opt/opencode-host/auth.json:ro
+      # Global agent skills (optional; remove if unused on the host).
+      - ${HOST_AGENTS_DIR:-${HOME}/.agents}:/tmp/devhome/.agents
+
+    ports:
+      - "${JUPYTER_PORT:-8888}:8888"
+      - "${TENSORBOARD_PORT:-6006}:6006"
+    command: sleep infinity
+
+volumes:
+  dev-home:

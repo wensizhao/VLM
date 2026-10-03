@@ -1,0 +1,115 @@
+# VLM-VAD prompt vocabulary
+# ------------------------------------------------------------------
+# Merged into `prompt` by utils/config.py: load_experiment_config().
+# Consumed by:
+#   prompts/processor.py   -> templates / expansions / hard_negatives / cache_enabled
+#   train/losses.py        -> normal_keywords / abnormal_keywords (prompt polarity)
+#   scripts/prompt_comparison.py -> experiments (Phase 2)
+#
+# `templates` maps a prompt TYPE to a template containing {placeholders}.
+# Each placeholder is expanded by its list in `expansions` (cartesian product).
+# ------------------------------------------------------------------
+
+# === Templates (one per prompt type) ===
+templates:
+  label: "a person {label}"
+  scene: "a {scene} scene"
+  contrast: "a video of {activity}"
+
+# === Expansions (placeholder -> list of values) ===
+# NOTE: keep normal / abnormal words mutually exclusive so that
+# build_prompt_polarity() can assign a clean {+1, -1, 0} polarity.
+expansions:
+  label:
+    - "fighting"
+    - "shooting"
+    - "stabbing"
+    - "vandalism"
+    - "theft"
+    - "assault"
+    - "burglary"
+    - "shoplifting"
+    - "walking"
+    - "standing"
+    - "sitting"
+    - "talking"
+    - "shopping"
+    - "working"
+
+  scene:
+    - "abnormal activity"
+    - "violent behavior"
+    - "suspicious crowd"
+    - "dangerous situation"
+    - "normal street"
+    - "quiet park"
+    - "empty mall"
+    - "calm office"
+    - "peaceful plaza"
+
+  activity:
+    - "abnormal behavior"
+    - "suspicious movement"
+    - "violent interaction"
+    - "unusual action"
+    - "normal behavior"
+    - "regular movement"
+    - "typical action"
+    - "calm activity"
+
+# === Hard negatives (custom list; used when process(hard_negatives=True)) ===
+hard_negatives:
+  - "a person walking normally"
+  - "a quiet empty street scene"
+
+# === Cache ===
+cache_enabled: true
+
+# === Polarity keywords (train/losses.py: build_prompt_polarity) ===
+normal_keywords:
+  - "normal"
+  - "walking"
+  - "standing"
+  - "sitting"
+  - "talking"
+  - "shopping"
+  - "working"
+  - "quiet"
+  - "empty"
+  - "calm"
+  - "peaceful"
+  - "regular"
+  - "typical"
+
+abnormal_keywords:
+  - "abnormal"
+  - "fighting"
+  - "shooting"
+  - "stabbing"
+  - "vandalism"
+  - "theft"
+  - "assault"
+  - "burglary"
+  - "shoplifting"
+  - "violent"
+  - "suspicious"
+  - "unusual"
+  - "dangerous"
+  - "erratic"
+
+# === Prompt ablation experiments (consumed by scripts/prompt_comparison.py) ===
+experiments:
+  label_only:
+    types: ["label"]
+  scene_only:
+    types: ["scene"]
+  contrast_only:
+    types: ["contrast"]
+  label_scene:
+    types: ["label", "scene"]
+  label_contrast:
+    types: ["label", "contrast"]
+  scene_contrast:
+    types: ["scene", "contrast"]
+  all_types:
+    types: ["label", "scene", "contrast"]

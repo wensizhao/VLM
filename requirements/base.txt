@@ -1,0 +1,22 @@
+torch==2.3.1
+numpy==1.26.4
+scipy==1.13.1
+pandas==2.2.2
+pyyaml==6.0.1
+omegaconf==2.3.0
+tqdm==4.66.4
+einops==0.8.0
+opencv-python-headless==4.10.0.84
+decord==0.6.0
+scikit-learn==1.5.1
+matplotlib==3.9.0
+seaborn==0.13.2
+tensorboard==2.17.0
+transformers==4.42.4
+accelerate==0.33.0
+open_clip_torch==2.26.1
+ftfy==6.2.0
+sentencepiece==0.2.0
+av==12.1.0
+# tools/annotation_tool (Flask web UI)
+flask==3.0.3

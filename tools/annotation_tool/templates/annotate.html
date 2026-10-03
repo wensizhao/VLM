@@ -1,0 +1,467 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="row">
+    <div class="col-md-8">
+        <!-- 视频播放器 -->
+        <div class="video-container">
+            <h4><i class="fas fa-play-circle"></i> 视频播放</h4>
+            <div class="video-controls">
+                <button id="playPauseBtn" class="btn btn-primary">
+                    <i class="fas fa-play"></i> 播放
+                </button>
+                <button id="stopBtn" class="btn btn-secondary">
+                    <i class="fas fa-stop"></i> 停止
+                </button>
+                <div class="btn-group" role="group">
+                    <button id="slowBtn" class="btn btn-outline-secondary">0.5x</button>
+                    <button id="normalBtn" class="btn btn-outline-secondary active">1x</button>
+                    <button id="fastBtn" class="btn btn-outline-secondary">2x</button>
+                </div>
+                <span id="currentTime" class="text-white">00:00</span>
+                <span class="text-white">/</span>
+                <span id="duration" class="text-white">00:00</span>
+            </div>
+            <video id="videoPlayer" width="100%" height="400" controls>
+                <source src="{{ url_for('static', filename='videos/' + video.filename) }}" type="video/mp4">
+                您的浏览器不支持视频播放。
+            </video>
+        </div>
+
+        <!-- 时间轴标注 -->
+        <div class="timeline-container">
+            <h4><i class="fas fa-clock"></i> 时间轴标注</h4>
+            <div class="timeline" id="timeline">
+                <div class="timeline-progress" id="timelineProgress"></div>
+                <div class="timeline-marker" id="startMarker"></div>
+                <div class="timeline-marker" id="endMarker"></div>
+            </div>
+            <div class="mt-3">
+                <button id="addSegmentBtn" class="btn btn-success">
+                    <i class="fas fa-plus"></i> 添加异常段
+                </button>
+                <button id="clearSegmentsBtn" class="btn btn-danger">
+                    <i class="fas fa-trash"></i> 清除所有
+                </button>
+            </div>
+            <div class="mt-2" id="segmentList">
+                <!-- 异常段列表将在这里显示 -->
+            </div>
+        </div>
+    </div>
+
+    <div class="col-md-4">
+        <!-- Prompt选择面板 -->
+        <div class="prompt-panel">
+            <h4><i class="fas fa-tags"></i> Prompt选择</h4>
+            
+            <!-- Prompt类型选择 -->
+            <div class="mb-3">
+                <label class="form-label">Prompt类型</label>
+                <div class="prompt-types">
+                    <div class="prompt-type active" data-type="label">
+                        <h5><i class="fas fa-tag"></i> Label类型</h5>
+                        <p class="text-muted">直接描述异常行为</p>
+                    </div>
+                    <div class="prompt-type" data-type="scene">
+                        <h5><i class="fas fa-image"></i> Scene类型</h5>
+                        <p class="text-muted">描述场景和异常活动</p>
+                    </div>
+                    <div class="prompt-type" data-type="contrast">
+                        <h5><i class="fas fa-exchange-alt"></i> Contrast类型</h5>
+                        <p class="text-muted">对比正常和异常行为</p>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Prompt选项 -->
+            <div class="mb-3">
+                <label class="form-label">选择Prompt</label>
+                <div id="promptOptions" class="prompt-options">
+                    <!-- Prompt选项将在这里动态加载 -->
+                </div>
+            </div>
+
+            <!-- 严重程度 -->
+            <div class="mb-3">
+                <label class="form-label">异常严重程度</label>
+                <select class="form-select" id="severitySelect">
+                    <option value="low">轻微</option>
+                    <option value="medium" selected>中等</option>
+                    <option value="high">严重</option>
+                </select>
+            </div>
+
+            <!-- 置信度 -->
+            <div class="mb-3">
+                <label class="form-label">标注置信度</label>
+                <input type="range" class="form-range" id="confidenceRange" min="0" max="1" step="0.1" value="0.8">
+                <div class="d-flex justify-content-between">
+                    <small>低</small>
+                    <small id="confidenceValue">0.8</small>
+                    <small>高</small>
+                </div>
+            </div>
+
+            <!-- 备注 -->
+            <div class="mb-3">
+                <label class="form-label">备注</label>
+                <textarea class="form-control" id="notesTextarea" rows="3" placeholder="添加标注备注..."></textarea>
+            </div>
+
+            <!-- 保存按钮 -->
+            <button id="saveAnnotationBtn" class="btn btn-primary btn-lg w-100">
+                <i class="fas fa-save"></i> 保存标注
+            </button>
+        </div>
+
+        <!-- 标注质量检查 -->
+        <div class="prompt-panel mt-3">
+            <h4><i class="fas fa-check-circle"></i> 质量检查</h4>
+            <div id="qualityCheck">
+                <div class="alert alert-info">
+                    <i class="fas fa-info-circle"></i> 请完成标注后查看质量评估
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<!-- 异常段编辑模态框 -->
+<div class="modal fade" id="segmentModal" tabindex="-1">
+    <div class="modal-dialog">
+        <div class="modal-content">
+            <div class="modal-header">
+                <h5 class="modal-title">编辑异常段</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+            </div>
+            <div class="modal-body">
+                <div class="mb-3">
+                    <label class="form-label">开始时间 (秒)</label>
+                    <input type="number" class="form-control" id="segmentStart" step="0.1" min="0">
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">结束时间 (秒)</label>
+                    <input type="number" class="form-control" id="segmentEnd" step="0.1" min="0">
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">Prompt</label>
+                    <input type="text" class="form-control" id="segmentPrompt" readonly>
+                </div>
+                <div class="mb-3">
+                    <label class="form-label">严重程度</label>
+                    <select class="form-select" id="segmentSeverity">
+                        <option value="low">轻微</option>
+                        <option value="medium">中等</option>
+                        <option value="high">严重</option>
+                    </select>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">取消</button>
+                <button type="button" class="btn btn-primary" id="saveSegmentBtn">保存</button>
+            </div>
+        </div>
+    </div>
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+// 全局变量
+let video = document.getElementById('videoPlayer');
+let currentTime = 0;
+let duration = 0;
+let playSpeed = 1;
+let anomalySegments = [];
+let currentPromptType = 'label';
+let selectedPrompt = '';
+let editingSegment = null;
+
+// 初始化
+document.addEventListener('DOMContentLoaded', function() {
+    initializeVideo();
+    initializePromptTypes();
+    initializeControls();
+    loadPrompts();
+});
+
+// 初始化视频
+function initializeVideo() {
+    video.addEventListener('loadedmetadata', function() {
+        duration = video.duration;
+        document.getElementById('duration').textContent = formatTime(duration);
+        updateTimeline();
+    });
+
+    video.addEventListener('timeupdate', function() {
+        currentTime = video.currentTime;
+        document.getElementById('currentTime').textContent = formatTime(currentTime);
+        updateTimeline();
+    });
+}
+
+// 初始化Prompt类型选择
+function initializePromptTypes() {
+    document.querySelectorAll('.prompt-type').forEach(element => {
+        element.addEventListener('click', function() {
+            document.querySelectorAll('.prompt-type').forEach(el => el.classList.remove('active'));
+            this.classList.add('active');
+            currentPromptType = this.dataset.type;
+            loadPrompts();
+        });
+    });
+}
+
+// 初始化控制按钮
+function initializeControls() {
+    // 播放/暂停
+    document.getElementById('playPauseBtn').addEventListener('click', function() {
+        if (video.paused) {
+            video.play();
+            this.innerHTML = '<i class="fas fa-pause"></i> 暂停';
+        } else {
+            video.pause();
+            this.innerHTML = '<i class="fas fa-play"></i> 播放';
+        }
+    });
+
+    // 停止
+    document.getElementById('stopBtn').addEventListener('click', function() {
+        video.pause();
+        video.currentTime = 0;
+        document.getElementById('playPauseBtn').innerHTML = '<i class="fas fa-play"></i> 播放';
+    });
+
+    // 播放速度
+    document.getElementById('slowBtn').addEventListener('click', function() {
+        setPlaySpeed(0.5);
+        updateSpeedButtons(this);
+    });
+
+    document.getElementById('normalBtn').addEventListener('click', function() {
+        setPlaySpeed(1);
+        updateSpeedButtons(this);
+    });
+
+    document.getElementById('fastBtn').addEventListener('click', function() {
+        setPlaySpeed(2);
+        updateSpeedButtons(this);
+    });
+
+    // 置信度滑块
+    document.getElementById('confidenceRange').addEventListener('input', function() {
+        document.getElementById('confidenceValue').textContent = this.value;
+    });
+
+    // 时间轴点击
+    document.getElementById('timeline').addEventListener('click', function(e) {
+        const rect = this.getBoundingClientRect();
+        const x = e.clientX - rect.left;
+        const time = (x / rect.width) * duration;
+        video.currentTime = time;
+    });
+
+    // 添加异常段
+    document.getElementById('addSegmentBtn').addEventListener('click', function() {
+        if (!selectedPrompt) {
+            alert('请先选择一个prompt');
+            return;
+        }
+        
+        const segment = {
+            id: Date.now(),
+            start: currentTime,
+            end: currentTime + 5, // 默认5秒
+            prompt: selectedPrompt,
+            prompt_type: currentPromptType,
+            severity: document.getElementById('severitySelect').value,
+            confidence: parseFloat(document.getElementById('confidenceRange').value)
+        };
+        
+        anomalySegments.push(segment);
+        updateSegmentList();
+        updateTimelineSegments();
+    });
+
+    // 清除所有异常段
+    document.getElementById('clearSegmentsBtn').addEventListener('click', function() {
+        if (confirm('确定要清除所有异常段吗？')) {
+            anomalySegments = [];
+            updateSegmentList();
+            updateTimelineSegments();
+        }
+    });
+
+    // 保存标注
+    document.getElementById('saveAnnotationBtn').addEventListener('click', saveAnnotation);
+}
+
+// 加载prompts
+function loadPrompts() {
+    fetch('/api/prompts')
+        .then(response => response.json())
+        .then(data => {
+            const promptOptions = document.getElementById('promptOptions');
+            promptOptions.innerHTML = '';
+            
+            const prompts = data[currentPromptType];
+            prompts[promptType + '_labels' || promptType + '_scenes' || promptType + '_activities'].forEach(prompt => {
+                const option = document.createElement('div');
+                option.className = 'prompt-option';
+                option.textContent = prompt;
+                option.addEventListener('click', function() {
+                    document.querySelectorAll('.prompt-option').forEach(el => el.classList.remove('selected'));
+                    this.classList.add('selected');
+                    selectedPrompt = this.textContent;
+                });
+                promptOptions.appendChild(option);
+            });
+        })
+        .catch(error => {
+            console.error('Error loading prompts:', error);
+        });
+}
+
+// 更新速度按钮
+function updateSpeedButtons(activeBtn) {
+    document.querySelectorAll('.btn-group .btn').forEach(btn => btn.classList.remove('active'));
+    activeBtn.classList.add('active');
+}
+
+// 设置播放速度
+function setPlaySpeed(speed) {
+    playSpeed = speed;
+    video.playbackRate = speed;
+}
+
+// 格式化时间
+function formatTime(seconds) {
+    const minutes = Math.floor(seconds / 60);
+    const secs = Math.floor(seconds % 60);
+    return `${minutes.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+}
+
+// 更新时间轴
+function updateTimeline() {
+    const progress = (currentTime / duration) * 100;
+    document.getElementById('timelineProgress').style.width = progress + '%';
+}
+
+// 更新异常段列表
+function updateSegmentList() {
+    const segmentList = document.getElementById('segmentList');
+    segmentList.innerHTML = '';
+    
+    anomalySegments.forEach(segment => {
+        const segmentDiv = document.createElement('div');
+        segmentDiv.className = 'anomaly-segment';
+        segmentDiv.innerHTML = `
+            ${formatTime(segment.start)} - ${formatTime(segment.end)}: ${segment.prompt}
+            <button class="btn btn-sm btn-light ms-2" onclick="editSegment(${segment.id})">
+                <i class="fas fa-edit"></i>
+            </button>
+            <button class="btn btn-sm btn-light ms-1" onclick="deleteSegment(${segment.id})">
+                <i class="fas fa-trash"></i>
+            </button>
+        `;
+        segmentList.appendChild(segmentDiv);
+    });
+}
+
+// 更新时间轴异常段显示
+function updateTimelineSegments() {
+    // 清除现有异常段
+    document.querySelectorAll('.timeline-segment').forEach(el => el.remove());
+    
+    // 添加新的异常段
+    anomalySegments.forEach(segment => {
+        const segmentDiv = document.createElement('div');
+        segmentDiv.className = 'timeline-segment';
+        const left = (segment.start / duration) * 100;
+        const width = ((segment.end - segment.start) / duration) * 100;
+        segmentDiv.style.left = left + '%';
+        segmentDiv.style.width = width + '%';
+        segmentDiv.title = `${formatTime(segment.start)} - ${formatTime(segment.end)}: ${segment.prompt}`;
+        document.getElementById('timeline').appendChild(segmentDiv);
+    });
+}
+
+// 编辑异常段
+function editSegment(id) {
+    const segment = anomalySegments.find(s => s.id === id);
+    if (segment) {
+        editingSegment = segment;
+        document.getElementById('segmentStart').value = segment.start;
+        document.getElementById('segmentEnd').value = segment.end;
+        document.getElementById('segmentPrompt').value = segment.prompt;
+        document.getElementById('segmentSeverity').value = segment.severity;
+        
+        const modal = new bootstrap.Modal(document.getElementById('segmentModal'));
+        modal.show();
+    }
+}
+
+// 删除异常段
+function deleteSegment(id) {
+    if (confirm('确定要删除这个异常段吗？')) {
+        anomalySegments = anomalySegments.filter(s => s.id !== id);
+        updateSegmentList();
+        updateTimelineSegments();
+    }
+}
+
+// 保存异常段
+document.getElementById('saveSegmentBtn').addEventListener('click', function() {
+    if (editingSegment) {
+        editingSegment.start = parseFloat(document.getElementById('segmentStart').value);
+        editingSegment.end = parseFloat(document.getElementById('segmentEnd').value);
+        editingSegment.severity = document.getElementById('segmentSeverity').value;
+        
+        updateSegmentList();
+        updateTimelineSegments();
+        
+        const modal = bootstrap.Modal.getInstance(document.getElementById('segmentModal'));
+        modal.hide();
+        editingSegment = null;
+    }
+});
+
+// 保存标注
+function saveAnnotation() {
+    if (anomalySegments.length === 0) {
+        alert('请至少添加一个异常段');
+        return;
+    }
+    
+    const annotationData = {
+        video_id: '{{ video.video_id }}',
+        annotator_id: 'current_user',
+        anomaly_segments: anomalySegments,
+        notes: document.getElementById('notesTextarea').value
+    };
+    
+    fetch('/api/annotations', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(annotationData)
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            alert('标注保存成功！');
+            // 可以跳转到其他页面或重置当前页面
+        } else {
+            alert('标注保存失败：' + data.error);
+        }
+    })
+    .catch(error => {
+        console.error('Error saving annotation:', error);
+        alert('标注保存失败，请重试');
+    });
+}
+</script>
+{% endblock %}

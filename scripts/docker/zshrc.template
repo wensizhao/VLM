@@ -1,0 +1,15 @@
+# >>> vlm-ws managed zshrc >>>
+# RMCS-style zsh bootstrap for the VLM workspace container.
+
+export ZSH="$HOME/.oh-my-zsh"
+ZSH_THEME="af-magic"
+plugins=(git)
+
+zstyle ':omz:update' mode disabled
+
+[ -f "$ZSH/oh-my-zsh.sh" ] && source "$ZSH/oh-my-zsh.sh"
+
+[ -f "$HOME/env_setup.zsh" ] && source "$HOME/env_setup.zsh"
+[ -f "$HOME/.claude_env" ] && source "$HOME/.claude_env"
+
+# <<< vlm-ws managed zshrc >>>

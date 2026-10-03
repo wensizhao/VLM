@@ -1,0 +1,115 @@
+# VLM-VAD experiment config
+# ------------------------------------------------------------------
+# This file is the single source of truth for training/eval/zero-shot.
+# It MUST match the keys read by:
+#   utils/config.py, models/factory.py, datasets/builders.py,
+#   train/trainer.py, train.py, eval.py, eval/inference.py
+#
+# Prompt templates live in prompts.yaml and are merged into `prompt` at load
+# time (see utils/config.py: load_experiment_config).
+# ------------------------------------------------------------------
+
+seed: 42
+device: "cuda"          # "auto" | "cuda" | "cpu"
+project: "vlm_vad"
+experiment: "baseline"
+
+# === Paths (consumed by train.py / eval.py) ===
+paths:
+  data_dir: "data"
+  log_dir: "logs"
+  checkpoint_dir: "checkpoints"
+  result_dir: "results"
+  feature_dir: "data/features"
+  run_name: "exp01"
+
+# === Data (consumed by datasets/builders.py + datasets/dataloader.py) ===
+data:
+  root: "data"                 # resolves to data/Avenue_Dataset automatically
+  dataset: "avenue"
+
+  train_split: "training"
+  eval_split: "testing"
+
+  # clip slicing
+  clip_length: 16
+  clip_stride: 1
+  clip_step: 16
+  include_last_clip: true
+
+  # frames
+  image_size: [224, 224]
+  video_backend: "auto"        # "auto" | "decord" | "opencv"
+
+  # labels — masks are downsampled grayscale frames, so pseudo labels are used
+  frame_label_mode: "motion_diff"   # "pixel" | "motion_diff"
+  motion_threshold: 3.0
+
+  # dataloader
+  batch_size: 4
+  num_workers: 4
+
+  # feature cache (fast path, ~10x)
+  feature_dir: "data/features"      # {feature_dir}/{split}/{video_id}.pt
+  label_dir: "data/labels"          # {label_dir}/{split}/{video_id}.pt
+  use_feature: false
+  allow_missing: false
+
+# === Model (consumed by models/factory.py) ===
+model:
+  backbone:
+    name: "ViT-B-32"                # open_clip model name (NOT "clip")
+    pretrained: "laion2b_s34b_b79k" # open_clip pretrained tag (NOT bool)
+    freeze_vision: true
+    freeze_text: true
+
+  alignment:
+    proj_type: "linear"             # "linear" | "mlp"
+    aligned_dim: 512                # must match CLIP ViT-B-32 output dim
+
+  matcher:
+    strategy: "cosine"              # "cosine" | "dot" | "learnable"
+    temperature: 0.07
+    learnable_temp: true
+
+  fusion:
+    type: "concat"                  # "concat" | "gated" | "crossattn"
+    fusion_input: "embedding"       # "embedding" | "raw" | "concat"
+    out_dim: 512
+    num_heads: 4
+
+  temporal:
+    type: "identity"                # "identity" | "transformer"
+    num_heads: 4
+    num_layers: 2
+
+  head:
+    hidden_dim: 256
+    dropout: 0.1
+
+# === Prompt (config_path merged into this section at load time) ===
+prompt:
+  config_path: "configs/prompts.yaml"
+
+# === Training (consumed by train/trainer.py) ===
+train:
+  epochs: 10
+  lr: 1.0e-4
+  lr_backbone: 1.0e-5
+  weight_decay: 1.0e-4
+  warmup_steps: 50
+  grad_clip: 1.0
+  amp: false
+  log_every: 10
+
+  loss:
+    w_bce: 1.0
+    w_contrastive: 0.5
+    skip_bce_when_no_pos: true
+
+# === Evaluation (consumed by train.py / eval.py / eval/inference.py) ===
+eval:
+  batch_size: 4
+  top_k_prompts: 5
+  save_plots: true
+  text_pool: "mean"     # zero-shot text pooling: "mean" (aligns with training) | "eos"

@@ -1,0 +1,17 @@
+.git
+.gitignore
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.so
+*.ipynb
+*.ipynb_checkpoints
+.env
+.venv/
+venv/
+checkpoints/
+logs/
+results/
+data/raw/
+data/processed/

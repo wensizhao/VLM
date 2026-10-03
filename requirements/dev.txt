@@ -1,0 +1,5 @@
+-r base.txt
+jupyterlab==4.2.3
+ipykernel==6.29.5
+pytest==8.2.2
+rich==13.7.1
