@@ -32,7 +32,7 @@ from .outputs import FusionOutput
 
 def _text_context_from_memory(
     visual: Tensor,
-    text_memory: Tensor,
+    text: Tensor,
     attn: nn.MultiheadAttention,
 ) -> tuple[Tensor, Tensor]:
     """Cross-attention: 每个视频帧 attend 到整个 Text Memory。
@@ -47,13 +47,13 @@ def _text_context_from_memory(
         attn_weights: ``(B, T, K*L)`` — attention weights (for interpretability).
     """
     B, T, D = visual.shape
-    K, L, _ = text_memory.shape
+    K, L, _ = text.shape
 
     # Flatten text memory: (K, L, D) → (B, K*L, D)
-    tm = text_memory.view(1, K * L, D).expand(B, -1, -1)
+    text_memory = text.view(1, K * L, D).expand(B, -1, -1)
 
     # Cross-attention: Q=visual, K/V=text_memory
-    text_context, attn_weights = attn(query=visual, key=tm, value=tm)
+    text_context, attn_weights = attn(query=visual, key=text_memory, value=text_memory)
     # text_context: (B, T, D), attn_weights: (B, T, K*L)
     return text_context, attn_weights
 
@@ -103,11 +103,11 @@ class ConcatFusion(nn.Module):
     def forward(
         self,
         visual: Tensor,
-        text_memory: Tensor,
+        text: Tensor,
     ) -> FusionOutput:
         """visual: (B, T, D), text_memory: (K, L, D) → FusionOutput."""
         text_context, attn_weights = _text_context_from_memory(
-            visual, text_memory, self.cross_attn,
+            visual, text, self.cross_attn,
         )
         # 逐帧 concat
         fused = torch.cat([visual, text_context], dim=-1)      # (B, T, 2*D)
@@ -122,7 +122,6 @@ class ConcatFusion(nn.Module):
             f"in_dim={self.in_dim}, out_dim={self.out_dim}, "
             f"fusion_input={self.fusion_input!r}"
         )
-
 
 class GatedFusion(nn.Module):
     """逐帧门控融合 — 轻量级。
@@ -163,14 +162,14 @@ class GatedFusion(nn.Module):
     def forward(
         self,
         visual: Tensor,
-        text_memory: Tensor,
+        text: Tensor,
     ) -> FusionOutput:
         """visual: (B, T, D), text_memory: (K, L, D) → FusionOutput."""
         text_context, attn_weights = _text_context_from_memory(
-            visual, text_memory, self.cross_attn,
+            visual, text, self.cross_attn,
         )
         # 逐帧门控
-        gate = torch.sigmoid(self.W_v(visual) + self.W_t(text_context))
+        gate = torch.sigmoid(self.W_v(visual) + self.W_t(text_context))   # (B, T, D)
         fused = gate * visual + (1.0 - gate) * text_context     # (B, T, D)
         return FusionOutput(
             fused=fused,                                         # (B, T, D)
@@ -223,17 +222,17 @@ class CrossAttnFusion(nn.Module):
     def forward(
         self,
         visual: Tensor,
-        text_memory: Tensor,
+        text: Tensor,
     ) -> FusionOutput:
         """visual: (B, T, D), text_memory: (K, L, D) → FusionOutput."""
         B, T, D = visual.shape
-        K, L, _ = text_memory.shape
+        K, L, _ = text.shape
 
         # Text Memory → (B, K*L, D)
-        tm = text_memory.view(1, K * L, D).expand(B, -1, -1)
+        text_memory = text.view(1, K * L, D).expand(B, -1, -1)
 
         # Cross-Attention: Q=vis, K/V=text_memory
-        attn_out, attn_weights = self.attn(query=visual, key=tm, value=tm)
+        attn_out, attn_weights = self.attn(query=visual, key=text_memory, value=text_memory)
         # attn_out: (B, T, D), attn_weights: (B, T, K*L)
 
         # 残差连接 + LayerNorm

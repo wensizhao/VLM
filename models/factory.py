@@ -142,7 +142,6 @@ def _build_temporal(cfg: DictConfig, dim: int) -> TemporalIdentity | TemporalTra
 
 def build_model(cfg: DictConfig) -> VLMModel:
     """从完整配置构造 VLMModel（backbone + alignment + fusion + temporal + head）。
-
     数学上需要理解的一个点：各模块的输入维度必须"对接得上"。
 
         fusion_input = "embedding" → Fusion 输入 = aligned_dim（投影后维度）

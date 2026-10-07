@@ -81,15 +81,12 @@ class PromptProcessor:
         self._manager = PromptManager(templates=user_templates)
         if user_templates is not None:
             # 把 default_type 切到用户的一个 key 上，否则 remove 会拒绝删除默认类型
-            first_user_key = next(iter(user_templates.keys()))
+            first_user_key = next(iter(user_templates.keys())) #取第一个user_templates中的type
             self._manager.default_type = first_user_key
             # 清理不属于用户的默认模板
             for key in self._manager.list_types():
                 if key not in user_templates:
-                    try:
-                        self._manager.remove(key)
-                    except RuntimeError:
-                        pass  # 最后一个模板不可删除
+                    self._manager.remove(key)
 
         self._expansions = dict(expansions) if expansions is not None else {}
 
@@ -124,8 +121,8 @@ class PromptProcessor:
             return list(self._cache[cache_key])
 
         # 1. 收集模板
-        template_types = types if types is not None else self._manager.list_types()
-        templates = [(t, self._manager.get(t)) for t in template_types]
+        template_types = types if types is not None else self._manager.list_types() #list[str]
+        templates = [(t, self._manager.get(t)) for t in template_types]    # list[tuple]
 
         # 2. 展开占位符
         if expand and self._expansions:

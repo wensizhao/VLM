@@ -58,7 +58,7 @@ class TemporalTransformer(nn.Module):
         num_heads: int = 4,
         num_layers: int = 2,
         dropout: float = 0.1,
-        max_length: int = 128,
+        max_length: int = 128,  # T max
     ) -> None:
         super().__init__()
         self.dim = dim
