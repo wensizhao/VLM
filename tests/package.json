@@ -1,0 +1,11 @@
+{
+  "name": "vlm-vad-studio-ui-tests",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node ui_smoke.mjs"
+  },
+  "dependencies": {
+    "playwright-core": "^1.49.1"
+  }
+}

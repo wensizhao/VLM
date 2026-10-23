@@ -33,6 +33,8 @@ from utils.config import load_experiment_config, save_config_snapshot
 from utils.io import ensure_dirs
 from utils.logging import get_logger
 from utils.reproducibility import set_seed
+from utils.provenance import runtime_info
+from utils.io import save_json
 
 log = get_logger(__name__)
 
@@ -45,21 +47,15 @@ def _markdown_table(results: list[dict[str, Any]]) -> str:
     rows = []
     for r in results:
         m = r["metrics"]
+        display = lambda key: "undefined" if m.get(key) is None else f"{m[key]:.4f}"
         rows.append(
-            "| {} | {} | {:.4f} | {:.4f} | {:.4f} | {:.4f} |".format(
+            "| {} | {} | {} | {} | {} | {} |".format(
                 r["experiment"], r["num_prompts"],
-                m.get("frame_auc", 0.0), m.get("frame_ap", 0.0),
-                m.get("video_auc", 0.0), m.get("video_ap", 0.0),
+                display("frame_auc"), display("frame_ap"),
+                display("video_auc"), display("video_ap"),
             )
         )
-    best = max(results, key=lambda r: r["metrics"].get("frame_auc", 0.0)) if results else None
-    footer = ""
-    if best is not None:
-        footer = (
-            "\n\n**Best by Frame AUC**: `{}` ({:.4f})\n".format(
-                best["experiment"], best["metrics"].get("frame_auc", 0.0))
-        )
-    return header + sep + "\n".join(rows) + footer
+    return header + sep + "\n".join(rows) + "\n\nFixed prompt comparisons; no selection using test labels.\n"
 
 
 def main() -> None:
@@ -86,6 +82,7 @@ def main() -> None:
     log.info("Prompt comparison | %d experiments | device=%s", len(args.experiments), device)
     ensure_dirs({"result": Path(args.output).parent, "out": Path(args.out_dir)})
     save_config_snapshot(cfg, Path(args.out_dir) / "config.yaml")
+    save_json(runtime_info(), Path(args.out_dir) / "environment.json")
 
     backbone = CLIPBackbone(
         model_name=str(cfg.model.backbone.name),
@@ -94,16 +91,19 @@ def main() -> None:
     processor = build_prompt_processor(cfg.prompt)
     loader, src = build_split_dataloader(
         cfg.data, split=cfg.data.eval_split, shuffle=False, seed=int(cfg.seed),
+        backbone_cfg=cfg.model.backbone,
     )
     log.info("Eval data ready | split=%s source=%s batches=%d",
              cfg.data.eval_split, src, len(loader))
 
     results: list[dict[str, Any]] = []
+    failures: list[dict[str, str]] = []
     start = time.time()
     for name in args.experiments:
         if name not in experiments_cfg:
             log.error("Unknown experiment %r; skipping (available: %s)",
                       name, list(experiments_cfg.keys()))
+            failures.append({"experiment": name, "error": "unknown experiment"})
             continue
         types = list(experiments_cfg[name].get("types", []))
         log.info("Running %s | types=%s", name, types)
@@ -128,6 +128,7 @@ def main() -> None:
             })
         except Exception as e:  # noqa: BLE001
             log.error("Experiment %s failed: %s", name, e)
+            failures.append({"experiment": name, "error": str(e)})
             continue
 
     total = time.time() - start
@@ -136,10 +137,10 @@ def main() -> None:
         "experiments": args.experiments,
         "total_time_sec": round(total, 2),
         "results": results,
-        "best_by_frame_auc": (
-            max(results, key=lambda r: r["metrics"].get("frame_auc", 0.0))["experiment"]
-            if results else None
-        ),
+        "failures": failures,
+        "selection_policy": "fixed comparisons; no selection using test labels",
+        "label_mode": str(cfg.data.frame_label_mode),
+        "text_pool": str(cfg.eval.text_pool),
     }
 
     ensure_dirs({"result": Path(args.output).parent})
@@ -157,14 +158,12 @@ def main() -> None:
     log.info("=" * 60)
     for r in results:
         m = r["metrics"]
-        log.info("%-14s K=%-3d frame_auc=%.4f frame_ap=%.4f video_auc=%.4f video_ap=%.4f",
+        log.info("%-14s K=%-3d frame_auc=%s frame_ap=%s video_auc=%s video_ap=%s",
                  r["experiment"], r["num_prompts"], m.get("frame_auc", 0.0),
                  m.get("frame_ap", 0.0), m.get("video_auc", 0.0), m.get("video_ap", 0.0))
-    if results:
-        best = max(results, key=lambda r: r["metrics"].get("frame_auc", 0.0))
-        log.info("Best by Frame AUC: %s (%.4f)", best["experiment"],
-                 best["metrics"].get("frame_auc", 0.0))
     log.info("Saved: %s | %s", args.output, md_path)
+    if failures:
+        raise SystemExit(1)
 
 
 if __name__ == "__main__":

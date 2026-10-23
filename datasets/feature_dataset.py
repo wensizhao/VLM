@@ -75,6 +75,8 @@ class FeatureDataset(Dataset[dict[str, Any]]):
         pad_short_clips: bool = False,
         preload: bool = True,
         allow_missing: bool = False,
+        label_dir: str | Path | None = None,
+        frame_label_mode: str = "pixel",
     ) -> None:
         """初始化 FeatureDataset。
 
@@ -95,6 +97,14 @@ class FeatureDataset(Dataset[dict[str, Any]]):
             raise ValueError("clip_length must be positive")
         if clip_stride <= 0:
             raise ValueError("clip_stride must be positive")
+        if clip_step is not None and clip_step <= 0:
+            raise ValueError("clip_step must be positive")
+        if frame_label_mode not in {"pixel", "motion_diff", "official"}:
+            raise ValueError(f"Unknown frame_label_mode: {frame_label_mode}")
+        if frame_label_mode in {"motion_diff", "official"} and label_dir is None:
+            raise ValueError(f"{frame_label_mode} feature data requires label_dir")
+        if frame_label_mode == "official" and allow_missing:
+            raise ValueError("Official evaluation requires all videos; allow_missing must be false")
 
         self.video_dir = _resolve_dir(video_dir, "video_dir / video_path")
         self.mask_dir = (
@@ -111,6 +121,10 @@ class FeatureDataset(Dataset[dict[str, Any]]):
         self.pad_short_clips = pad_short_clips
         self.preload = preload
         self.allow_missing = allow_missing
+        self.label_dir = Path(label_dir) if label_dir is not None else None
+        self.frame_label_mode = frame_label_mode
+        self._labels: dict[str, torch.Tensor] = {}
+        self.label_provenance: dict = {}
 
         # 构建与 VideoDataset 完全相同的视频索引和 clip 索引
         self.video_records = self._build_video_records()
@@ -138,7 +152,13 @@ class FeatureDataset(Dataset[dict[str, Any]]):
     # ── Build indices (mirrors VideoDataset) ──────────────────
 
     def _build_video_records(self) -> list[VideoRecord]:
-        from .video_dataset import _read_video_metadata
+        if self.frame_label_mode == "official":
+            # 官方标签的 root 由显式 video_dir 的父目录推出（Design A）
+            from .labels import official_video_records
+            records, self.label_provenance = official_video_records(
+                self.video_dir.parent, self.split, self.label_dir)
+            return records
+        from .video_dataset import _read_video_metadata, _read_mask_metadata
 
         video_paths = sorted(self.video_dir.glob("*.avi"))
         if not video_paths:
@@ -197,6 +217,8 @@ class FeatureDataset(Dataset[dict[str, Any]]):
         """确保每个视频的特征帧数 == 视频真实帧数。"""
         for vr in self.video_records:
             feat = self._resolve_feature(vr.video_id)
+            if not isinstance(feat, torch.Tensor) or feat.ndim != 2 or not torch.isfinite(feat).all():
+                raise ValueError(f"Expected finite (N,D) features for {vr.video_id}")
             if feat.shape[0] != vr.num_frames:
                 raise RuntimeError(
                     f"Feature frame count mismatch for {vr.video_id}: "
@@ -243,8 +265,22 @@ class FeatureDataset(Dataset[dict[str, Any]]):
         feat = self._resolve_feature(vr.video_id)
         vis_feat = feat[indices]   # (T, D) — 直接就是 CLIP 编码后的特征
 
-        # 标注 —— 用 GT 二值 mask；mask 缺失 → 该视频为正常视频（全 0）
-        if vr.mask_path is None:
+        # 标注 —— 优先用预计算标签文件，否则用像素 mask
+        if self.frame_label_mode in {"motion_diff", "official"}:
+            label_path = self.label_dir / f"{vr.video_id}.pt"
+            if not label_path.is_file():
+                raise FileNotFoundError(
+                    f"Label file not found: {label_path}. "
+                    f"Prepare the configured {self.frame_label_mode} labels first."
+                )
+            from .labels import load_frame_labels
+            if vr.video_id not in self._labels:
+                self._labels[vr.video_id] = load_frame_labels(label_path, vr.num_frames)
+            labels = self._labels[vr.video_id]
+            frame_label = labels[indices].to(torch.long)
+            clip_masks = frame_label.unsqueeze(1).float()  # (T, 1) 占位
+        elif vr.mask_path is None:
+            # 无 GT mask → 该视频视为正常视频（全 0）
             frame_label = torch.zeros(len(indices), dtype=torch.long)
             clip_masks = frame_label.unsqueeze(1).float()  # (T, 1) 占位
         else:
@@ -259,6 +295,5 @@ class FeatureDataset(Dataset[dict[str, Any]]):
             "clip_label": frame_label.amax(),    # scalar
             "video_id": vr.video_id,
             "start_frame": clip.start_frame,
-            # (T,) 每个 clip 帧在原视频中的真实下标（含 clip_stride 跨步与边界裁剪）
-            "frame_indices": torch.from_numpy(indices),
+            "frame_indices": torch.from_numpy(indices.copy()),
         }

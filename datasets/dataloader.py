@@ -39,6 +39,9 @@ def build_video_dataset(
     resize_mask_to_video: bool = False,
     include_last_clip: bool = True,
     pad_short_clips: bool = False,
+    frame_label_mode: str = "pixel",
+    motion_threshold: float = 3.0,
+    label_dir: str | Path | None = None,
 ) -> VideoDataset:
     """Construct a :class:`VideoDataset`."""
     return VideoDataset(
@@ -47,6 +50,8 @@ def build_video_dataset(
         image_size=image_size, video_backend=video_backend,
         resize_mask_to_video=resize_mask_to_video,
         include_last_clip=include_last_clip, pad_short_clips=pad_short_clips,
+        frame_label_mode=frame_label_mode, motion_threshold=motion_threshold,
+        label_dir=label_dir,
     )
 
 
@@ -101,6 +106,8 @@ def build_feature_dataset(
     pad_short_clips: bool = False,
     preload: bool = True,
     allow_missing: bool = False,
+    label_dir: str | Path | None = None,
+    frame_label_mode: str = "pixel",
 ) -> FeatureDataset:
     """Construct a :class:`FeatureDataset`."""
     return FeatureDataset(
@@ -108,7 +115,8 @@ def build_feature_dataset(
         split=split,
         clip_length=clip_length, clip_stride=clip_stride, clip_step=clip_step,
         include_last_clip=include_last_clip, pad_short_clips=pad_short_clips,
-        preload=preload, allow_missing=allow_missing,
+        preload=preload, allow_missing=allow_missing, label_dir=label_dir,
+        frame_label_mode=frame_label_mode,
     )
 
 

@@ -135,6 +135,8 @@ def extract(
     """对所有视频的所有帧逐帧编码并保存为 .pt 文件。"""
     out_path = Path(out_dir)
     out_path.mkdir(parents=True, exist_ok=True)
+    from utils.reproducibility import set_seed
+    set_seed(42)
 
     # 1. 加载 backbone (eval, no grad)
     print(f"[1/4] Loading backbone: {model_name} ({pretrained})")
@@ -154,15 +156,18 @@ def extract(
     print(f"[3/4] Extracting features (batch_size={batch_size})...")
     with torch.no_grad():
         for idx in tqdm(range(len(iterator)), desc="Videos", unit="video"):
-            video_id, frames = iterator[idx]  # frames: (N, C, H, W)
-            N = frames.shape[0]
+            from datasets.video_dataset import _read_frames_opencv
+            record = iterator.records[idx]
+            video_id = record.video_id
+            N = record.num_frames
 
             # 分批过 ViT
             all_feats: list[torch.Tensor] = []
             for start in range(0, N, batch_size):
                 end = min(start + batch_size, N)
-                chunk = frames[start:end].to(device)  # (B, C, H, W)
-                feats = backbone._clip.encode_image(chunk, normalize=True)  # (B, D)
+                raw = _read_frames_opencv(record.video_path, np.arange(start, end))
+                chunk = torch.from_numpy(raw.copy()).permute(0, 3, 1, 2).float().to(device) / 255.0
+                feats = backbone.encode_video(chunk.unsqueeze(0)).squeeze(0)
                 all_feats.append(feats.cpu())
 
             features = torch.cat(all_feats, dim=0)  # (N, D)
@@ -170,6 +175,12 @@ def extract(
             # 保存
             save_path = out_path / f"{video_id}.pt"
             torch.save(features, save_path)
+
+    from datasets.cache import FEATURE_VERSION
+    from utils.io import save_json
+    save_json({"model_name": model_name, "pretrained": pretrained,
+               "preprocessing": FEATURE_VERSION, "dim": backbone.dim,
+               "split": split, "num_videos": len(iterator)}, out_path / "manifest.json")
 
     # 4. 完成
     total_size = sum(

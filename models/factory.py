@@ -27,6 +27,7 @@ from models.fusion import ConcatFusion, CrossAttnFusion, GatedFusion
 from models.head import AnomalyHead
 from models.matcher import Matcher
 from models.temporal import TemporalIdentity, TemporalTransformer
+from models.registry import backbones
 from prompts import PromptManager
 from prompts.processor import PromptProcessor
 
@@ -47,6 +48,14 @@ def build_prompt_processor(prompt_cfg: DictConfig) -> PromptProcessor:
     if not templates:
         # 配置为空时退回到内置默认模板（label / scene / contrast）
         templates = dict(PromptManager().to_dict())
+
+    selected = prompt_cfg.get("types", None)
+    if selected is None and prompt_cfg.get("prompt_type", None) is not None:
+        selected = [str(prompt_cfg.prompt_type)]
+    if selected is not None:
+        if not selected or any(t not in templates for t in selected):
+            raise ValueError(f"Unknown or empty prompt types: {selected}")
+        templates = {str(t): templates[t] for t in selected}
 
     expansions = (
         {k: list(v) for k, v in prompt_cfg.get("expansions", {}).items()}
@@ -93,10 +102,12 @@ def build_matcher(model_cfg: DictConfig) -> Matcher:
 
 def _build_backbone(cfg: DictConfig) -> CLIPBackbone:
     """构造 backbone 并按配置冻结 vision/text。"""
-    backbone = CLIPBackbone(
-        model_name=str(cfg.backbone.name),
-        pretrained=str(cfg.backbone.pretrained),
-    )
+    if str(cfg.backbone.get("provider", "clip")) == "clip":
+        backbone = CLIPBackbone(
+            model_name=str(cfg.backbone.name), pretrained=str(cfg.backbone.pretrained),
+        )
+    else:
+        backbone = backbones.build(str(cfg.backbone.provider), cfg.backbone)
     # 冻结选项：设计里"backbone 冻结 + 预提取特征"是快速训练路径
     if cfg.backbone.get("freeze_vision", False):
         backbone.freeze_vision()

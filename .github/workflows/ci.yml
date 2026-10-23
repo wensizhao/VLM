@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: [main, dev, "feat/**"]
+    branches: [main, dev, "feat/**", "merge/**"]
   pull_request:
     branches: [main, dev]
 
@@ -24,15 +24,33 @@ jobs:
           cache: pip
           cache-dependency-path: |
             requirements/base.txt
+            requirements/torch.txt
             requirements/ci.txt
 
       # 先装 CPU 版 torch/torchvision，避免拉取数 GB 的 CUDA wheel；
       # 随后 requirements/ci.txt 中的 torch==2.3.1 视其为已满足，不会重复下载。
       - name: Install CPU PyTorch
-        run: pip install torch==2.3.1 torchvision==0.18.1 --index-url https://download.pytorch.org/whl/cpu
+        run: pip install -r requirements/torch.txt --index-url https://download.pytorch.org/whl/cpu
 
       - name: Install project dependencies
         run: pip install -r requirements/ci.txt
 
       - name: Run smoke tests
         run: pytest -q
+
+  container-config:
+    name: Container configuration
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate entrypoints and Compose variants
+        run: |
+          bash -n scripts/dev.sh scripts/docker/entrypoint.sh
+          docker compose --env-file /dev/null -f docker-compose.yml config --quiet
+          docker compose --env-file /dev/null -f docker-compose.yml -f docker-compose.gpu.yml config --quiet
+          docker compose --env-file /dev/null -f docker-compose.yml -f docker-compose.host-tools.yml config --quiet
+          docker compose --env-file /dev/null -f docker-compose.yml -f docker-compose.gpu.yml -f docker-compose.host-tools.yml config --quiet
+          docker compose --env-file /dev/null -f docker-compose.yml -f docker-compose.web.yml config --quiet
+          docker compose --env-file /dev/null -f docker-compose.yml -f docker-compose.gpu.yml -f docker-compose.web.yml config --quiet
+          docker compose --env-file /dev/null -f docker-compose.yml -f .devcontainer/docker-compose.yml config --quiet
+          docker compose --env-file /dev/null -f docker-compose.yml -f docker-compose.gpu.yml -f .devcontainer/docker-compose.yml config --quiet

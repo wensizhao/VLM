@@ -23,7 +23,11 @@ class _ModuleOutput:
     def to_dict(self) -> dict[str, Any]:
         """将 dataclass 转为 dict，方便传给 loss 函数或序列化。"""
         import dataclasses
-        return dataclasses.asdict(self)
+        # asdict deep-copies tensors and fails on non-leaf autograd tensors.
+        return {f.name: getattr(self, f.name) for f in dataclasses.fields(self)}
+
+    def __getitem__(self, key: str) -> Any:
+        return self.to_dict()[key]
 
     def _compact(self, max_len: int = 80) -> str:
         """紧凑的 repr，截断过长的 shape 列表。"""
@@ -181,3 +185,14 @@ class ModelOutput(_ModuleOutput):
     fusion: FusionOutput
     temporal: TemporalOutput
     head: HeadOutput
+    explanation: str | None = None
+
+    @property
+    def anomaly_score(self) -> Tensor:
+        """Batch anomaly scores (B,), alias for the existing clip API."""
+        return self.clip_score
+
+    def to_dict(self) -> dict[str, Any]:
+        result = super().to_dict()
+        result["anomaly_score"] = self.anomaly_score
+        return result

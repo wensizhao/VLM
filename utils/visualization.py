@@ -48,7 +48,7 @@ def plot_temporal_heatmap(
     传入整段视频的 ``(T,)`` 分数即可得到完整时间轴（不再是单个 clip）。
 
     Args:
-        frame_scores: ``(T,)`` 帧级异常分数 [0, 1]。
+        frame_scores: ``(T,)`` 原始帧级异常分数，可为余弦差或距离；并非概率。
         frame_labels: ``(T,)`` 可选——GT 标签，用于把异常区间涂成红色背景。
         title: 图标题。
         save_path: 保存路径；None 则显示。
@@ -67,10 +67,10 @@ def plot_temporal_heatmap(
             frame_labels.cpu().numpy() if isinstance(frame_labels, Tensor)
             else np.asarray(frame_labels)
         )
-        ax.imshow(
-            labels[None, :], aspect="auto", cmap="Reds", alpha=0.25,
-            extent=(0, len(scores) - 1, 0, 1), interpolation="nearest",
-        )
+        if labels.shape != scores.shape:
+            raise ValueError("Timeline scores and labels must have the same shape")
+        ax.fill_between(np.arange(len(scores)), 0, 1, where=labels > 0,
+                        transform=ax.get_xaxis_transform(), color="tab:red", alpha=0.15, step="mid")
 
     ax.plot(np.arange(len(scores)), scores, color="tab:blue", linewidth=1.2)
     if threshold is not None:
@@ -81,7 +81,11 @@ def plot_temporal_heatmap(
         ax.legend(loc="upper right", fontsize=8)
     ax.set_xlabel("Frame index")
     ax.set_ylabel("Anomaly score")
-    ax.set_ylim(-0.05, 1.05)
+    low, high = float(scores.min()), float(scores.max())
+    if threshold is not None:
+        low, high = min(low, float(threshold)), max(high, float(threshold))
+    margin = max((high - low) * 0.05, abs(low) * 0.01, 1e-4)
+    ax.set_ylim(low - margin, high + margin)
     ax.set_title(title)
 
     _save_or_show(fig, save_path)

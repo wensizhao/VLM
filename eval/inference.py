@@ -35,7 +35,14 @@ from torch import Tensor
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
-from eval.metrics import clip_level_metrics, frame_level_metrics, video_level_metrics
+from eval.metrics import (
+    binary_ranking_metrics,
+    clip_level_metrics,
+    frame_level_metrics,
+    reported_video_metrics,
+)
+from eval.protocol import evaluation_provenance
+from eval.aggregation import accumulate_frames, dense_average
 from models import VLMModel
 from models.matcher import Matcher
 from train.losses import build_prompt_polarity
@@ -155,6 +162,7 @@ def evaluate_videos(
     out_dir: str | Path | None = None,
     save_plots: bool = True,
     cfg: Any | None = None,
+    training_protocol: dict | None = None,
 ) -> dict[str, Any]:
     """对整个数据集做视频级评估，返回指标 + 解释 + 可视化文件。
 
@@ -201,6 +209,7 @@ def evaluate_videos(
     zs_enabled: bool = False
     zs_txt_pooled: Tensor | None = None
     accum_zs: dict[str, np.ndarray] = {}
+    counts_zs: dict[str, np.ndarray] = {}
     zs_clip_scores: list[float] = []
     # 空张量占位：zs_enabled=False 时不会被使用，避免 Optional 判空散落各处
     zs_abn_mask = torch.empty(0, dtype=torch.bool, device=device)
@@ -253,7 +262,8 @@ def evaluate_videos(
             clip_score = output.clip_score.cpu().numpy()          # (B,)
             # 每个样本的逐 prompt 相似度（用于解释）
             txt_pooled = output.alignment.text_embedding.mean(dim=1)
-            match = matcher(output.embedding, txt_pooled)
+            # Matcher is trained in aligned visual/text space, not the fused head space.
+            match = matcher(output.alignment.visual_embedding.mean(dim=1), txt_pooled)
             anomaly_sims = match.similarity.cpu().numpy()         # (B, K)
 
             # 零样本保底：raw CLIP 特征（跳过全部可训练模块）
@@ -276,6 +286,7 @@ def evaluate_videos(
                 start = int(batch["start_frame"][b])
                 fs = frame_scores[b]
                 lbl = batch["frame_label"][b].cpu().numpy()   # (T,)
+                indices = batch["frame_indices"][b].cpu().numpy()
 
                 # 惰性初始化该视频的数组
                 if vid not in accum:
@@ -288,6 +299,7 @@ def evaluate_videos(
                     label_cnt[vid] = np.zeros(n, dtype=np.float64)
                     if zs_enabled:
                         accum_zs[vid] = np.zeros(n, dtype=np.float64)
+                        counts_zs[vid] = np.zeros(n, dtype=np.float64)
                     worst_clips[vid] = {
                         "start": start, "clip_score": -1.0,
                         "anomaly_sims": None, "frame_scores": None,
@@ -297,9 +309,9 @@ def evaluate_videos(
                 # 标签同样按坐标累加（与分数对齐，保证评估逻辑与标签来源解耦）
                 _accumulate_scores(label_acc[vid], label_cnt[vid], batch, b, start, lbl.astype(np.float64))
 
-                # 零样本保底分数同样按坐标累加（共用 counts，覆盖次数一致）
+                # 独立计数，避免零样本累加再次增加 trained 分数的分母。
                 if zs_fs is not None:
-                    _accumulate_scores(accum_zs[vid], counts[vid], batch, b, start, zs_fs[b])
+                    _accumulate_scores(accum_zs[vid], counts_zs[vid], batch, b, start, zs_fs[b])
                     zs_clip_scores.append(float(zs_fs[b].max()))
 
                 # clip 级收集
@@ -311,9 +323,13 @@ def evaluate_videos(
                     worst_clips[vid].update(
                         start=start, clip_score=float(clip_score[b]),
                         anomaly_sims=anomaly_sims[b], frame_scores=fs,
+                        frame_indices=indices,
                     )
 
     # ── 每视频逐帧分数 = 累加/覆盖次数（等权平均）─────────────────
+    missing = {r.video_id for r in dataset.video_records} - set(accum)
+    if missing:
+        raise ValueError(f"No evaluation clips for videos: {sorted(missing)}; enable pad_short_clips")
     per_video: dict[str, Any] = {}
     dense_scores: dict[str, np.ndarray] = {}
     dense_labels: dict[str, np.ndarray] = {}
@@ -323,11 +339,11 @@ def evaluate_videos(
     video_labels: dict[str, int] = {}
 
     for vid in accum:
-        scores = accum[vid] / np.maximum(counts[vid], 1.0)
+        scores = dense_average(accum[vid], counts[vid])
         # 帧标签 = 覆盖到的 clip 标签多数票（>0.5 → 异常）
-        lab = (label_acc[vid] / np.maximum(label_cnt[vid], 1.0) > 0.5).astype(np.int64)
+        lab = (dense_average(label_acc[vid], label_cnt[vid]) > 0.5).astype(np.int64)
         # 该视频 frame AUC（>= 需要一个正常帧+异常帧）
-        per_video[vid] = frame_level_metrics(scores, lab)
+        per_video[vid] = binary_ranking_metrics(scores, lab, "frame")
         per_video[vid]["num_frames"] = int(len(lab))
         per_video[vid]["num_anomaly_frames"] = int(lab.sum())
 
@@ -343,24 +359,24 @@ def evaluate_videos(
     gfl = np.concatenate(global_frame_labels)
 
     metrics = {}
-    metrics.update(frame_level_metrics(gfs, gfl))
-    metrics.update(clip_level_metrics(
-        np.asarray(clip_scores), np.asarray(clip_labels),
+    metrics.update(binary_ranking_metrics(gfs, gfl, "frame"))
+    metrics.update(binary_ranking_metrics(
+        np.asarray(clip_scores), np.asarray(clip_labels), "clip",
     ))
-    metrics.update(video_level_metrics(video_scores, video_labels))
+    metrics.update(reported_video_metrics(video_scores, video_labels))
 
     log.info(
-        "Eval | frame_auc=%.4f frame_ap=%.4f clip_auc=%.4f clip_ap=%.4f "
-        "video_auc=%.4f",
+        "Eval | frame_auc=%s frame_ap=%s clip_auc=%s clip_ap=%s "
+        "video_auc=%s",
         metrics.get("frame_auc", 0.0), metrics.get("frame_ap", 0.0),
         metrics.get("clip_auc", 0.0), metrics.get("clip_ap", 0.0),
-        metrics.get("video_auc", 0.0),
+        metrics.get("video_auc"),
     )
 
     # ── 零样本保底指标（zs_* 前缀，与训练指标并列）──────────────────
     if zs_enabled:
         zs_gfs = np.concatenate([
-            accum_zs[vid] / np.maximum(counts[vid], 1.0) for vid in accum
+            dense_average(accum_zs[vid], counts_zs[vid]) for vid in accum
         ])
         zs_frame = frame_level_metrics(zs_gfs, gfl)
         zs_clip = clip_level_metrics(
@@ -368,11 +384,11 @@ def evaluate_videos(
         )
         metrics.update({f"zs_{k}": v for k, v in {**zs_frame, **zs_clip}.items()})
         log.info(
-            "Zero-shot CLIP 保底 | zs_frame_auc=%.4f zs_clip_auc=%.4f | "
-            "trained: frame_auc=%.4f clip_auc=%.4f —— 训练后应≥保底，"
+            "Zero-shot CLIP 保底 | zs_frame_auc=%s zs_clip_auc=%s | "
+            "trained: frame_auc=%s clip_auc=%s —— 训练后应≥保底，"
             "若明显低于保底说明训练出了问题",
-            zs_frame.get("frame_auc", 0.0), zs_clip.get("clip_auc", 0.0),
-            metrics.get("frame_auc", 0.0), metrics.get("clip_auc", 0.0),
+            zs_frame.get("frame_auc"), zs_clip.get("clip_auc"),
+            metrics.get("frame_auc"), metrics.get("clip_auc"),
         )
 
     # ── 可解释性：为每个视频最异常的 clip 生成解释 ─────────────────
@@ -380,13 +396,18 @@ def evaluate_videos(
         model, worst_clips, prompts_with_types,
         top_k=top_k, out_dir=out_dir, save_plots=save_plots,
         polarity=polarity,
+        dense_scores=dense_scores, dense_labels=dense_labels,
     )
 
     if out_dir is not None:
         out = Path(out_dir)
         out.mkdir(parents=True, exist_ok=True)
-        save_json({"metrics": metrics, "per_video": per_video}, out / "metrics.json")
+        save_json({"metrics": metrics, "per_video": per_video,
+                   **evaluation_provenance(dataset, training_protocol or {"mode": "trained", "label_mode": "unknown"})},
+                  out / "metrics.json")
         save_json(explanations, out / "explanations.json")
+        np.savez_compressed(out / "frame_scores.npz", **dense_scores)
+        np.savez_compressed(out / "frame_labels.npz", **dense_labels)
 
     return {
         "metrics": metrics,
@@ -405,6 +426,8 @@ def _build_explanations(
     out_dir: str | Path | None,
     save_plots: bool,
     polarity: torch.Tensor | None = None,
+    dense_scores: dict[str, np.ndarray] | None = None,
+    dense_labels: dict[str, np.ndarray] | None = None,
 ) -> dict[str, dict[str, Any]]:
     """为每个视频生成 template-based 解释（回答"为什么异常"）。
 
@@ -443,9 +466,9 @@ def _build_explanations(
         } for i in order[:top_k]]
 
         # 异常的帧排名（最异常的帧在前）
-        frame_rank = np.argsort(fs)[::-1].tolist()
+        frame_rank = clip["frame_indices"][np.argsort(fs)[::-1]].tolist()
 
-        explanation = _template_explanation(top, clip["start"], fs)
+        explanation = _template_explanation(top, clip["start"], fs, clip["frame_indices"])
 
         entry = {
             "start_frame": int(clip["start"]),
@@ -453,6 +476,8 @@ def _build_explanations(
             "top_prompts": top,
             "top_abnormal_frames": frame_rank[:5],
             "explanation": explanation,
+            "decision": "uncalibrated",
+            "explanation_method": "prompt_retrieval_template",
         }
         result[vid] = entry
 
@@ -461,7 +486,9 @@ def _build_explanations(
             plot_dir = Path(out_dir) / "plots"
             try:
                 plot_temporal_heatmap(
-                    fs, title=f"{vid} clip@{clip['start']} frame anomaly",
+                    dense_scores[vid] if dense_scores is not None else fs,
+                    frame_labels=dense_labels[vid] if dense_labels is not None else None,
+                    title=f"{vid} full video frame anomaly",
                     save_path=plot_dir / f"{vid}_heatmap.png",
                 )
                 plot_prompt_scores(
@@ -480,6 +507,7 @@ def _template_explanation(
     top: list[dict[str, Any]],
     start_frame: int,
     frame_scores: np.ndarray,
+    frame_indices: np.ndarray | None = None,
 ) -> str:
     """模板化解释——把 top-k prompt 与帧排名组织成一句话。
 
@@ -489,8 +517,10 @@ def _template_explanation(
         f"{t['prompt']!r}(sim={t['similarity']:.2f})" for t in top[:3]
     )
     worst_frame = int(np.argmax(frame_scores))
+    absolute_frame = int(frame_indices[worst_frame]) if frame_indices is not None else start_frame + worst_frame
     return (
-        f"该视频段（起始帧 {start_frame}）被判定为异常，"
-        f"因为画面语义与以下描述最接近：{reason}。"
-        f"其中最异常的是第 {start_frame + worst_frame} 帧（分数 {float(frame_scores[worst_frame]):.2f}）。"
+        f"该视频段（起始帧 {start_frame}）的异常分数峰值为 {float(frame_scores.max()):.3f}，"
+        f"与画面语义最接近的异常候选描述为：{reason}。"
+        f"其中分数最高的是第 {absolute_frame} 帧（分数 {float(frame_scores[worst_frame]):.2f}）。"
+        "候选描述是检索结果，异常决策阈值尚未校准。"
     )

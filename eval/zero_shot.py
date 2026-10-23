@@ -36,10 +36,12 @@ import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset
 from tqdm import tqdm
 
-from eval.metrics import clip_level_metrics, frame_level_metrics, video_level_metrics
+from eval.metrics import binary_ranking_metrics, reported_video_metrics
+from eval.protocol import evaluation_provenance
 from models.backbone import CLIPBackbone
 from prompts.processor import PromptProcessor
 from train.losses import build_prompt_polarity
+from eval.aggregation import accumulate_frames, dense_average
 from utils.io import save_json
 from utils.logging import get_logger
 from utils.visualization import plot_prompt_scores, plot_temporal_heatmap
@@ -249,6 +251,7 @@ def evaluate_zero_shot(
             start = int(batch["start_frame"][b])
             fs = anomaly[b]
             lbl = batch["frame_label"][b].cpu().numpy().astype(np.float64)
+            indices = batch["frame_indices"][b].cpu().numpy()
 
             if vid not in accum:
                 rec = next(r for r in dataset.video_records if r.video_id == vid)
@@ -273,9 +276,13 @@ def evaluate_zero_shot(
                     start=start, clip_score=clip_score,
                     sims=sims[b].mean(axis=0),            # (K,) 该 clip 平均相似度
                     frame_scores=fs,
+                    frame_indices=indices,
                     embedding=vis_feat[b].mean(dim=0).detach().cpu().numpy(),
                 )
 
+    missing = {r.video_id for r in dataset.video_records} - set(accum)
+    if missing:
+        raise ValueError(f"No evaluation clips for videos: {sorted(missing)}; enable pad_short_clips")
     per_video: dict[str, Any] = {}
     frame_score: dict[str, np.ndarray] = {}
     anomaly_score: dict[str, float] = {}
@@ -285,10 +292,10 @@ def evaluate_zero_shot(
     global_labels: list[np.ndarray] = []
 
     for vid in accum:
-        scores = accum[vid] / np.maximum(counts[vid], 1.0)
-        lab = (label_acc[vid] / np.maximum(label_cnt[vid], 1.0) > 0.5).astype(np.int64)
+        scores = dense_average(accum[vid], counts[vid])
+        lab = (dense_average(label_acc[vid], label_cnt[vid]) > 0.5).astype(np.int64)
 
-        per_video[vid] = frame_level_metrics(scores, lab)
+        per_video[vid] = binary_ranking_metrics(scores, lab, "frame")
         per_video[vid]["num_frames"] = int(len(lab))
         per_video[vid]["num_anomaly_frames"] = int(lab.sum())
 
@@ -299,17 +306,17 @@ def evaluate_zero_shot(
         global_scores.append(scores)
         global_labels.append(lab)
 
-    metrics: dict[str, float] = {}
+    metrics: dict[str, float | None] = {}
     if global_scores:
-        metrics.update(frame_level_metrics(
-            np.concatenate(global_scores), np.concatenate(global_labels)))
-    metrics.update(clip_level_metrics(
-        np.asarray(clip_scores), np.asarray(clip_labels)))
-    metrics.update(video_level_metrics(anomaly_score, video_labels))
+        metrics.update(binary_ranking_metrics(
+            np.concatenate(global_scores), np.concatenate(global_labels), "frame"))
+    metrics.update(binary_ranking_metrics(
+        np.asarray(clip_scores), np.asarray(clip_labels), "clip"))
+    metrics.update(reported_video_metrics(anomaly_score, video_labels))
 
     log.info(
-        "Zero-shot | prompts(K=%d, +1=%d, -1=%d) | frame_auc=%.4f frame_ap=%.4f "
-        "video_auc=%.4f video_ap=%.4f",
+        "Zero-shot | prompts(K=%d, +1=%d, -1=%d) | frame_auc=%s frame_ap=%s "
+        "video_auc=%s video_ap=%s",
         len(prompts), int((polarity == 1).sum()), int((polarity == -1).sum()),
         metrics.get("frame_auc", 0.0), metrics.get("frame_ap", 0.0),
         metrics.get("video_auc", 0.0), metrics.get("video_ap", 0.0),
@@ -337,10 +344,15 @@ def evaluate_zero_shot(
         out.mkdir(parents=True, exist_ok=True)
         save_json(
             {"metrics": metrics, "per_video": per_video,
-             "anomaly_score": anomaly_score},
+             "anomaly_score": anomaly_score,
+             "text_pool": text_pool, "prompts": prompts,
+             "polarity": detector.polarity.cpu().tolist(),
+             **evaluation_provenance(dataset)},
             out / "zero_shot_metrics.json",
         )
         save_json(explanations, out / "zero_shot_explanations.json")
+        np.savez_compressed(out / "frame_scores.npz", **frame_score)
+        np.savez_compressed(out / "frame_labels.npz", **dict(zip(frame_score, global_labels)))
 
     return results
 
@@ -378,17 +390,17 @@ def _build_explanations(
         )
         worst_frame = int(np.argmax(fs))
         explanation = (
-            f"该视频最异常的片段起始于第 {clip['start']} 帧，"
-            f"与以下 prompt 语义最接近：{reason}。"
-            f"其中第 {clip['start'] + worst_frame} 帧异常分数最高"
-            f"（{float(fs[worst_frame]):.3f}）。"
+            f"该视频最高分片段起始于第 {clip['start']} 帧，"
+            f"与以下候选异常描述语义最接近：{reason}。"
+            f"其中第 {int(clip['frame_indices'][worst_frame])} 帧异常分数最高"
+            f"（{float(fs[worst_frame]):.3f}）。分数未校准，候选描述不代表已确认事件。"
         )
 
         result[vid] = {
             "start_frame": int(clip["start"]),
             "clip_score": round(float(clip["clip_score"]), 4),
             "top_prompts": top,
-            "top_abnormal_frames": np.argsort(fs)[::-1][:5].tolist(),
+            "top_abnormal_frames": clip["frame_indices"][np.argsort(fs)[::-1][:5]].tolist(),
             "explanation": explanation,
         }
 

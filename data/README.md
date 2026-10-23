@@ -24,17 +24,17 @@
 ```
 磁盘上的文件                         Python 对象                    GPU 上的张量
 ═══════════                        ════════════                  ════════════
-                                                           
-  testing_videos/01.avi  ─┐                                    
-  testing_label_mask/    ─┤     AvenueVideoRecord              
-   1_label.mat            ├─ video_path                  
-                          ├──► ├─ mask_path                   
-                          │    ├─ num_frames                  
-  testing_videos/02.avi  ─┤    └─ frame_height/width           
-  testing_label_mask/    ─┘                                    
-   2_label.mat                                                 
-                                       │                        
-                                       ▼                        
+
+  testing_videos/01.avi  ─┐
+  testing_label_mask/    ─┤     AvenueVideoRecord
+   1_label.mat            ├─ video_path
+                          ├──► ├─ mask_path
+                          │    ├─ num_frames
+  testing_videos/02.avi  ─┤    └─ frame_height/width
+  testing_label_mask/    ─┘
+   2_label.mat
+                                       │
+                                       ▼
                                AvenueClipRecord         ┌──────────────────┐
                                ├─ video_index           │ video: (T,C,H,W) │
                                └─ start_frame           │ mask:  (T,H,W)   │──► model ◄── prompts
@@ -125,7 +125,7 @@ def _normalize_split(split: str) -> Split:
 def _build_video_records(self) -> list[AvenueVideoRecord]:
     video_dir = self.video_dir            # 来自配置的 video_path（必填）
     video_paths = sorted(video_dir.glob("*.avi"))
-    
+
     records: list[AvenueVideoRecord] = []
     for video_path in video_paths:
         video_id = video_path.stem       # 文件名去掉后缀
@@ -309,7 +309,7 @@ def _compute_clip_starts(num_frames, clip_span, clip_step,
     return starts
 ```
 
-**核心数学：** 
+**核心数学：**
 
 | 变量 | 公式 |
 |---|---|
@@ -678,16 +678,16 @@ def build_avenue_dataloader(
     num_workers=0, pin_memory=True, drop_last=False,
     seed=None, **dataset_kwargs
 ) -> DataLoader:
-    
+
     dataset = build_avenue_dataset(root=root, split=split, **dataset_kwargs)
-    
+
     generator = None
     worker_init_fn = None
     if seed is not None:
         generator = torch.Generator()
         generator.manual_seed(seed)
         worker_init_fn = seed_worker
-    
+
     return DataLoader(
         dataset,
         batch_size=batch_size,
@@ -911,7 +911,7 @@ pm.register("running", "a person running fast")
 pm.register("fighting", "two people fighting aggressively")
 
 # 推理时：一个视频 batch 同时对比所有 prompt
-prompts = pm.get_batch()  
+prompts = pm.get_batch()
 # ["a person walking normally...", "a person running fast", ...]
 
 output = model(batch["video"], prompts)

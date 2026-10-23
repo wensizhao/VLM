@@ -1,0 +1,34 @@
+{
+  "name": "vlm-ws (CPU)",
+  "initializeCommand": ["bash", "${localWorkspaceFolder}/scripts/dev.sh", "cpu", "ensure-image"],
+  "dockerComposeFile": [
+    "../../docker-compose.yml",
+    "../docker-compose.yml"
+  ],
+  "service": "vlm-dev",
+  "workspaceFolder": "/workspace/vlm_ws",
+  "shutdownAction": "stopCompose",
+  "overrideCommand": false,
+  "updateRemoteUserUID": false,
+  "remoteEnv": {
+    "SHELL": "/usr/bin/zsh"
+  },
+  "customizations": {
+    "vscode": {
+      "settings": {
+        "terminal.integrated.defaultProfile.linux": "zsh",
+        "terminal.integrated.profiles.linux": {
+          "zsh": {
+            "path": "/usr/bin/zsh"
+          }
+        }
+      },
+      "extensions": [
+        "ms-python.python",
+        "ms-python.vscode-pylance",
+        "ms-toolsai.jupyter",
+        "redhat.vscode-yaml"
+      ]
+    }
+  }
+}

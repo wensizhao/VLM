@@ -1,0 +1,124 @@
+# Evaluation only. Do not use testing ground truth to train or select a model.
+# VLM-VAD experiment config
+# ------------------------------------------------------------------
+# This file is the single source of truth for training/eval/zero-shot.
+# It MUST match the keys read by:
+#   utils/config.py, models/factory.py, datasets/builders.py,
+#   train/trainer.py, train.py, eval.py, eval/inference.py
+#
+# Prompt templates live in prompts.yaml and are merged into `prompt` at load
+# time (see utils/config.py: load_experiment_config).
+# ------------------------------------------------------------------
+
+seed: 42
+device: "auto"          # "auto" | "cuda" | "cpu"
+project: "vlm_vad"
+experiment: "official_zero_shot"
+
+# === Paths (consumed by train.py / eval.py) ===
+paths:
+  data_dir: "data"
+  log_dir: "logs"
+  checkpoint_dir: "checkpoints"
+  result_dir: "results"
+  feature_dir: "data/features_v2"
+  run_name: "live_smoke_official"
+
+# === Data (consumed by datasets/builders.py + datasets/dataloader.py) ===
+data:
+  dataset: "avenue"
+
+  train_split: "training"
+  eval_split: "testing"
+  validation_fraction: 0.25   # hold out training videos; never select on test
+
+  # Explicit paths match the upstream dataset API. Official labels use label_dir.
+  train:
+    video_path: "data/Avenue_Dataset/training_videos"
+    mask_path: null
+  test:
+    video_path: "data/Avenue_Dataset/testing_videos"
+    mask_path: null
+
+  # clip slicing
+  clip_length: 16
+  clip_stride: 1
+  clip_step: 16
+  include_last_clip: true
+
+  # frames
+  image_size: null            # backbone owns resize, crop and normalization
+  video_backend: "auto"        # "auto" | "decord" | "opencv"
+
+  # Official evaluation only: training annotations are not included in the ZIP
+  frame_label_mode: "official"   # verified official testing annotations
+  motion_threshold: 3.0
+
+  # dataloader
+  batch_size: 4
+  num_workers: 0
+
+  # feature cache (fast path, ~10x)
+  feature_dir: "data/features_v2"
+  label_dir: "data/labels_official"
+  use_feature: "auto"          # auto | true (required) | false (pixel path)
+  allow_missing: false
+
+# === Model (consumed by models/factory.py) ===
+model:
+  backbone:
+    name: "ViT-B-32"                # open_clip model name (NOT "clip")
+    pretrained: "laion2b_s34b_b79k" # open_clip pretrained tag (NOT bool)
+    freeze_vision: true
+    freeze_text: true
+
+  alignment:
+    proj_type: "linear"             # "linear" | "mlp"
+    aligned_dim: 512                # must match CLIP ViT-B-32 output dim
+
+  matcher:
+    strategy: "cosine"              # "cosine" | "dot" | "learnable"
+    temperature: 0.07
+    learnable_temp: true
+
+  fusion:
+    type: "concat"                  # "concat" | "gated" | "crossattn"
+    fusion_input: "embedding"       # "embedding" | "raw" | "concat"
+    out_dim: 512
+    num_heads: 4
+
+  temporal:
+    type: "identity"                # "identity" | "transformer"
+    num_heads: 4
+    num_layers: 2
+
+  head:
+    hidden_dim: 256
+    dropout: 0.1
+
+# === Prompt (config_path merged into this section at load time) ===
+prompt:
+  config_path: "configs/prompts.yaml"
+
+# === Training (consumed by train/trainer.py) ===
+train:
+  epochs: 10
+  lr: 1.0e-4
+  lr_backbone: 1.0e-5
+  weight_decay: 1.0e-4
+  warmup_steps: 50
+  grad_clip: 1.0
+  amp: false
+  log_every: 10
+
+  loss:
+    w_bce: 1.0
+    w_contrastive: 0.5
+    skip_bce_when_no_pos: false  # normal-only batches also train the classifier
+
+# === Evaluation (consumed by train.py / eval.py / eval/inference.py) ===
+eval:
+  batch_size: 4
+  top_k_prompts: 5
+  save_plots: true
+  text_pool: "eos"     # zero-shot text pooling: "mean" (aligns with training) | "eos"

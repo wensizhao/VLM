@@ -1,12 +1,16 @@
 {
-  "name": "vlm-ws",
+  "name": "vlm-ws (NVIDIA CUDA)",
+  "initializeCommand": ["bash", "${localWorkspaceFolder}/scripts/dev.sh", "gpu", "ensure-image"],
   "dockerComposeFile": [
+    "../../docker-compose.yml",
+    "../../docker-compose.gpu.yml",
     "../docker-compose.yml"
   ],
   "service": "vlm-dev",
   "workspaceFolder": "/workspace/vlm_ws",
   "shutdownAction": "stopCompose",
   "overrideCommand": false,
+  "updateRemoteUserUID": false,
   "remoteEnv": {
     "SHELL": "/usr/bin/zsh"
   },
@@ -15,9 +19,7 @@
       "settings": {
         "terminal.integrated.defaultProfile.linux": "zsh",
         "terminal.integrated.profiles.linux": {
-          "zsh": {
-            "path": "/usr/bin/zsh"
-          }
+          "zsh": {"path": "/usr/bin/zsh"}
         }
       },
       "extensions": [

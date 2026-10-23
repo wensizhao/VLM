@@ -20,8 +20,8 @@ paths:
   log_dir: "logs"
   checkpoint_dir: "checkpoints"
   result_dir: "results"
-  feature_dir: "data/features"
-  run_name: "exp01"
+  feature_dir: "data/features_v2"
+  run_name: "baseline_v2"
 
 # === Data (consumed by datasets/builders.py + datasets/dataloader.py) ===
 # Design A：每个 split 显式声明自己的路径，datasets 按 split 取用。
@@ -33,6 +33,7 @@ data:
   # split 选择器（被 train.py / eval.py / scripts 读取）
   train_split: "training"
   eval_split: "testing"
+  validation_fraction: 0.25   # hold out training videos; never select on test
 
   # 显式 per-split 路径（datasets/builders.py 按 split 取用）
   train:
@@ -49,16 +50,19 @@ data:
   include_last_clip: true
 
   # frames
-  image_size: [224, 224]
+  image_size: null            # backbone owns resize, crop and normalization
   video_backend: "auto"        # "auto" | "decord" | "opencv"
 
   # dataloader
   batch_size: 4
   num_workers: 4
 
-  # feature cache (fast path, ~10x): {feature_dir}/{split}/{video_id}.pt
-  feature_dir: "data/features"
-  use_feature: false
+  # feature cache (fast path, ~10x)
+  feature_dir: "data/features_v2"
+  # 逐帧标签来源：pixel（GT mask，默认）| motion_diff（运动伪标签）| official（官方 mat 标注）
+  frame_label_mode: "pixel"
+  label_dir: "data/labels_v2"
+  use_feature: "auto"          # auto | true (required) | false (pixel path)
   allow_missing: false
 
 # === Model (consumed by models/factory.py) ===
@@ -111,7 +115,7 @@ train:
   loss:
     w_bce: 1.0
     w_contrastive: 0.5
-    skip_bce_when_no_pos: true
+    skip_bce_when_no_pos: false  # normal-only batches also train the classifier
 
 # === Evaluation (consumed by train.py / eval.py / eval/inference.py) ===
 eval:

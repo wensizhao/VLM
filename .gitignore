@@ -17,6 +17,8 @@ env/
 
 # ── Environment & secrets ───────────────────────────────────
 .env
+.env.*
+!.env.example
 *.secret
 *.key
 
@@ -26,6 +28,9 @@ env/
 
 # ── Dataset (large binary files — download separately) ──────
 data/Avenue_Dataset/
+data/features*/
+data/labels*/
+data/ground_truth_demo.zip
 
 # ── Runtime outputs (keep dirs via .gitkeep) ────────────────
 checkpoints/*
@@ -70,3 +75,10 @@ node_modules/
 *~
 .vscode/
 .directory
+
+# ── Web Studio runtime ───────────────────────────────────────
+data/uploads/
+configs/generated/
+logs/web_jobs/
+.npm-cache/
+.npm-logs/

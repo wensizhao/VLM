@@ -37,6 +37,10 @@ def set_seed(seed: int) -> None:
     Args:
         seed: 全局随机种子（通常是任意整数，如 42）。
     """
+    # Must be set before any CUDA RNG/context initialization.
+    os.environ.setdefault("CUBLAS_WORKSPACE_CONFIG", ":4096:8")
+    torch.backends.cuda.matmul.allow_tf32 = False
+    torch.backends.cudnn.allow_tf32 = False
     # 1) Python 内置 random —— 影响 random.shuffle / random.choice 等
     random.seed(seed)
 

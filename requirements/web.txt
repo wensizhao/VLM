@@ -1,0 +1,4 @@
+# Web Studio runtime dependency.
+# The main image already includes Flask in requirements/base.txt; this file is
+# for rebuilding a minimal web container if the prebuilt image is stale.
+flask==3.0.3

@@ -45,8 +45,8 @@ def load_experiment_config(path: str | Path) -> DictConfig:
         if not p.is_file():
             raise FileNotFoundError(f"Prompt config not found: {p}")
         prompt_cfg = OmegaConf.load(str(p))
-        # 合并：prompts.yaml 的内容覆盖 experiment.yaml 里 prompt 段的同名键
-        cfg.prompt = OmegaConf.merge(cfg.prompt, prompt_cfg)
+        # Experiment overrides win; an inline snapshot must remain self-contained.
+        cfg.prompt = OmegaConf.merge(prompt_cfg, cfg.prompt)
 
     # 解析设备
     device_str = str(cfg.get("device", "auto")).lower()
@@ -68,5 +68,8 @@ def save_config_snapshot(cfg: DictConfig, path: str | Path) -> Path:
     """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    OmegaConf.save(cfg, str(path))
+    snapshot = OmegaConf.create(OmegaConf.to_container(cfg, resolve=True))
+    if snapshot.get("prompt", None) is not None:
+        snapshot.prompt.pop("config_path", None)
+    OmegaConf.save(snapshot, str(path))
     return path

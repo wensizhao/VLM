@@ -250,7 +250,7 @@ class VLMVADLoss(nn.Module):
         matcher: Matcher,
         w_bce: float = 1.0,
         w_contrastive: float = 0.5,
-        skip_bce_when_no_pos: bool = True,
+        skip_bce_when_no_pos: bool = False,
     ) -> None:
         super().__init__()
         self.w_bce = w_bce

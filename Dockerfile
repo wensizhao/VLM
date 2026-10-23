@@ -1,7 +1,8 @@
-ARG BASE_IMAGE=pytorch/pytorch:2.3.1-cuda12.1-cudnn8-runtime
+ARG BASE_IMAGE=python:3.10-slim-bookworm
 FROM ${BASE_IMAGE}
 
 ARG DEBIAN_FRONTEND=noninteractive
+ARG TORCH_INDEX_URL=https://download.pytorch.org/whl/cpu
 ARG NODE_VERSION=22.15.1
 ARG OPENCODE_VERSION=latest
 ARG INSTALL_OPTIONAL_SHELL_TOOLS=0
@@ -17,9 +18,7 @@ ENV TZ=Asia/Shanghai \
   PIP_NO_CACHE_DIR=1 \
   PYTHONPATH=/workspace/vlm_ws
 
-# 替换 apt 源为阿里云（适用于 Ubuntu 22.04 Jammy）
-RUN sed -i 's/archive.ubuntu.com/mirrors.aliyun.com/g' /etc/apt/sources.list && \
-  sed -i 's/security.ubuntu.com/mirrors.aliyun.com/g' /etc/apt/sources.list
+# The image supplies its own Debian/Ubuntu userland, independent of the host distro.
 RUN apt-get update && apt-get install -y --no-install-recommends \
   bash \
   build-essential \
@@ -57,9 +56,18 @@ RUN if [ "${INSTALL_OPTIONAL_SHELL_TOOLS}" = "1" ]; then \
 
 WORKDIR /workspace/vlm_ws
 
-COPY requirements /tmp/requirements
+COPY requirements/torch.txt /tmp/requirements/torch.txt
 RUN python -m pip install --upgrade pip setuptools wheel \
+  && python -m pip install -r /tmp/requirements/torch.txt --index-url "${TORCH_INDEX_URL}"
+
+COPY requirements /tmp/requirements
+# The pinned CUDA base contains both 4.11.0 and 4.12.1 dist-info records.
+# Remove every old typing-extensions installation before resolving dependencies.
+RUN while python -m pip show typing-extensions >/dev/null 2>&1; do \
+    python -m pip uninstall --yes typing-extensions || exit 1; \
+  done \
   && python -m pip install -r /tmp/requirements/dev.txt \
+  && python -m pip check \
   && rm -rf /tmp/requirements
 
 COPY scripts/docker/entrypoint.sh /usr/local/bin/docker-entrypoint.sh

@@ -16,8 +16,6 @@ if [ -d "${VLM_WS_PATH}/scripts" ]; then
     export PATH="${PATH}:${VLM_WS_PATH}/scripts"
 fi
 
-if [ -f "${VLM_WS_PATH}/.venv/bin/activate" ]; then
-    source "${VLM_WS_PATH}/.venv/bin/activate"
-fi
+# Use the image's interpreter; a bind-mounted host .venv can target another OS/CPU.
 
 # <<< vlm-ws managed env_setup <<<

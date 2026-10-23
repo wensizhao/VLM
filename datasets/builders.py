@@ -52,7 +52,7 @@ def _feature_dir_exists(data_cfg: DictConfig, split: str) -> bool:
     fd = data_cfg.get("feature_dir", None)
     if not fd:
         return False
-    return (Path(fd) / split).is_dir()
+    return any((Path(fd) / split).glob("*.pt"))
 
 
 def _resolve_split_paths(
@@ -109,6 +109,7 @@ def build_split_dataloader(
     split: str,
     shuffle: bool,
     seed: int | None = None,
+    backbone_cfg: DictConfig | None = None,
 ) -> tuple[DataLoader, str]:
     """为某个 split 构建 DataLoader。
 
@@ -123,20 +124,29 @@ def build_split_dataloader(
         供上层决定走 forward_from_visual 还是 forward。
     """
     normalized, video_path, mask_path = _resolve_split_paths(data_cfg, split)
-
+    if data_cfg.get("frame_label_mode") == "motion_diff" and data_cfg.get("label_dir"):
+        from .cache import validate_motion_cache
+        validate_motion_cache(Path(data_cfg.label_dir) / normalized,
+                              float(data_cfg.get("motion_threshold", 3.0)))
     common = dict(
         clip_length=int(data_cfg.get("clip_length", 16)),
         clip_stride=int(data_cfg.get("clip_stride", 1)),
         clip_step=int(data_cfg.get("clip_step", 16)),
         include_last_clip=bool(data_cfg.get("include_last_clip", True)),
+        pad_short_clips=bool(data_cfg.get("pad_short_clips", False)),
     )
 
-    use_feature = bool(data_cfg.get("use_feature", False)) or _feature_dir_exists(
-        data_cfg, normalized
-    )
+    # use_feature: "auto"（默认，看目录是否存在）/ true / false
+    requested = data_cfg.get("use_feature", "auto")
+    if requested not in ("auto", True, False):
+        raise ValueError("data.use_feature must be auto, true or false")
+    use_feature = _feature_dir_exists(data_cfg, normalized) if requested == "auto" else bool(requested)
 
     if use_feature:
         feature_dir = Path(data_cfg.feature_dir) / normalized
+        if backbone_cfg is not None:
+            from .cache import validate_feature_cache
+            validate_feature_cache(feature_dir, backbone_cfg)
         loader = build_feature_dataloader(
             feature_dir=feature_dir,
             video_dir=video_path,
@@ -147,6 +157,11 @@ def build_split_dataloader(
             num_workers=int(data_cfg.get("num_workers", 0)),
             seed=seed,
             allow_missing=bool(data_cfg.get("allow_missing", False)),
+            frame_label_mode=str(data_cfg.get("frame_label_mode", "pixel")),
+            label_dir=(
+                Path(data_cfg.label_dir) / normalized
+                if data_cfg.get("label_dir", None) is not None else None
+            ),
             **common,
         )
         return loader, "feature"
@@ -159,8 +174,12 @@ def build_split_dataloader(
         shuffle=shuffle,
         num_workers=int(data_cfg.get("num_workers", 0)),
         seed=seed,
-        image_size=tuple(data_cfg.get("image_size", (224, 224))),
+        image_size=(tuple(data_cfg.image_size) if data_cfg.get("image_size") is not None else None),
         video_backend=str(data_cfg.get("video_backend", "auto")),
+        frame_label_mode=str(data_cfg.get("frame_label_mode", "pixel")),
+        motion_threshold=float(data_cfg.get("motion_threshold", 3.0)),
+        label_dir=(Path(data_cfg.label_dir) / normalized
+                   if data_cfg.get("label_dir", None) is not None else None),
         **common,
     )
     return loader, "video"

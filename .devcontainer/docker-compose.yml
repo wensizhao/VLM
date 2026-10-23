@@ -1,0 +1,5 @@
+# initializeCommand has already pulled or built the selected image.
+# In particular, do not retry pulling a locally built :latest tag.
+services:
+  vlm-dev:
+    pull_policy: never

@@ -27,11 +27,13 @@
 from __future__ import annotations
 
 import math
+import random
 from pathlib import Path
 
+import numpy as np
 import torch
 import torch.nn as nn
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import LambdaLR
 from torch.utils.data import DataLoader
@@ -51,7 +53,7 @@ log = get_logger(__name__)
 # 优化器 & 学习率调度
 # ═══════════════════════════════════════════════════════════════════
 
-def build_optimizer(model: VLMModel, cfg: DictConfig) -> torch.optim.Optimizer:
+def build_optimizer(model: VLMModel, cfg: DictConfig, matcher: Matcher | None = None) -> torch.optim.Optimizer:
     """构造 AdamW 优化器，backbone 与下游模块使用不同学习率。
 
     为什么 backbone 用更小学习率？
@@ -92,6 +94,11 @@ def build_optimizer(model: VLMModel, cfg: DictConfig) -> torch.optim.Optimizer:
     ]
     # 过滤空组（backbone 全冻结时 backbone_params 为空）
     groups = [g for g in groups if g["params"]]
+    if matcher is not None:
+        existing = {id(p) for group in groups for p in group["params"]}
+        params = [p for p in matcher.parameters() if p.requires_grad and id(p) not in existing]
+        if params:
+            groups.append({"params": params, "lr": lr, "weight_decay": wd})
     return AdamW(groups)
 
 
@@ -126,7 +133,7 @@ def build_scheduler(
     def lr_lambda(step: int) -> float:
         if step < warmup:
             # 线性预热：step/warmup ∈ (0, 1]
-            return step / max(1, warmup)
+            return (step + 1) / max(1, warmup)
         # 余弦：从 1 平滑降到 0（LambdaLR 会把结果乘回组里的 lr）
         progress = (step - warmup) / max(1, total - warmup)
         return 0.5 * (1.0 + math.cos(math.pi * min(progress, 1.0)))
@@ -167,7 +174,7 @@ class Trainer:
             w_bce=float(cfg.train.loss.get("w_bce", 1.0)),
             w_contrastive=float(cfg.train.loss.get("w_contrastive", 0.5)),
             skip_bce_when_no_pos=bool(
-                cfg.train.loss.get("skip_bce_when_no_pos", True)
+                cfg.train.loss.get("skip_bce_when_no_pos", False)
             ),
         ).to(device)
         self.train_loader = train_loader
@@ -184,7 +191,7 @@ class Trainer:
 
         # 优化器 / 调度器
         total_steps = len(train_loader) * int(cfg.train.get("epochs", 1))
-        self.optimizer = build_optimizer(model, cfg.train)
+        self.optimizer = build_optimizer(model, cfg.train, matcher)
         self.scheduler = build_scheduler(self.optimizer, cfg.train, total_steps)
 
         # 路径 & 日志
@@ -198,7 +205,8 @@ class Trainer:
         self.epochs = int(cfg.train.get("epochs", 1))
         self.grad_clip = float(cfg.train.get("grad_clip", 1.0))
         self.log_every = int(cfg.train.get("log_every", 10))
-        self.amp_enabled = bool(cfg.train.get("amp", False)) and torch.cuda.is_available()
+        self.amp_enabled = bool(cfg.train.get("amp", False)) and device.type == "cuda"
+        self.scaler = torch.cuda.amp.GradScaler(enabled=self.amp_enabled)
         if cfg.train.get("amp", False) and not torch.cuda.is_available():
             log.warning("amp requested but CUDA unavailable; falling back to fp32.")
 
@@ -220,29 +228,33 @@ class Trainer:
 
     def _train_step(self, batch: dict, step: int) -> dict[str, float]:
         batch = self._to_device(batch, self.device)
-        output = self._forward_batch(batch)
-
-        losses = self.criterion(
-            output,
-            frame_label=batch["frame_label"],
-            clip_label=batch["clip_label"],
-            polarity=self.polarity,
-        )
+        with torch.autocast(device_type=self.device.type, enabled=self.amp_enabled):
+            output = self._forward_batch(batch)
+            losses = self.criterion(
+                output, frame_label=batch["frame_label"],
+                clip_label=batch["clip_label"], polarity=self.polarity,
+            )
         total = losses["total"]
+        if not torch.isfinite(total):
+            raise FloatingPointError(f"Non-finite loss at step {step}")
 
         # backward：链式法则自动求导，梯度累加到各 param.grad
         self.optimizer.zero_grad(set_to_none=True)
-        total.backward()
+        self.scaler.scale(total).backward()
+        self.scaler.unscale_(self.optimizer)
 
         # 梯度裁剪：把整条梯度向量的范数压到 grad_clip 以内
         #   g ← g · min(1, grad_clip / ‖g‖)
         # 防止个别 batch 梯度范数爆炸（loss landscape 陡峭区）导致参数巨幅跳动。
         torch.nn.utils.clip_grad_norm_(
-            self.model.parameters(), self.grad_clip,
+            [p for g in self.optimizer.param_groups for p in g["params"]], self.grad_clip,
         )
 
-        self.optimizer.step()   # Adam 参数更新
-        self.scheduler.step()   # 学习率调度（每步更新）
+        old_scale = self.scaler.get_scale()
+        self.scaler.step(self.optimizer)
+        self.scaler.update()
+        if self.scaler.get_scale() >= old_scale:
+            self.scheduler.step()
 
         return {
             "loss": float(losses["total"]),
@@ -256,9 +268,10 @@ class Trainer:
     def train_epoch(self, epoch: int) -> dict[str, float]:
         """跑一个训练 epoch，返回精确平均的指标。"""
         self.model.train()
+        self.matcher.train()
         self.metric_logger.reset()
         total_batches = len(self.train_loader)
-        global_step = epoch * total_batches
+        global_step = (epoch - 1) * total_batches
 
         loader = tqdm(self.train_loader, desc=f"Epoch {epoch} [train]", leave=False)
         for step, batch in enumerate(loader):
@@ -282,6 +295,7 @@ class Trainer:
     def validate_epoch(self, epoch: int) -> dict[str, float]:
         """验证一个 epoch——算 frame/clip 级 AUC & AP（训练监控用）。"""
         self.model.eval()
+        self.matcher.eval()
         frame_scores: list[torch.Tensor] = []
         frame_labels: list[torch.Tensor] = []
         clip_scores: list[torch.Tensor] = []
@@ -328,6 +342,7 @@ class Trainer:
             self.device, self.amp_enabled,
         )
 
+        history = []
         for epoch in range(start_epoch, self.epochs + 1):
             train_stats = self.train_epoch(epoch)
             log.info(
@@ -345,8 +360,13 @@ class Trainer:
                 self.best_val_metric = metric
 
             self._save_checkpoint(epoch, val_stats, is_best)
+            history.append({"epoch": epoch, "train": train_stats, "validation": val_stats})
+            from utils.io import save_json
+            save_json(history, Path(self.cfg.paths.result_dir) / self.run_name /
+                      f"history_from_epoch_{start_epoch}.json")
 
         log.info("Training finished. Best clip_auc=%.4f", self.best_val_metric)
+        self.tb.close()
         return {"best_clip_auc": self.best_val_metric}
 
     # ── Checkpoint ────────────────────────────────────────────────
@@ -354,6 +374,9 @@ class Trainer:
     def _save_checkpoint(self, epoch: int, val_stats: dict, is_best: bool) -> None:
         """保存训练状态（含 optimizer/scheduler——这样能无缝续训）。"""
         state = {
+            "format_version": 2,
+            "config": OmegaConf.to_container(self.cfg, resolve=True),
+            "prompts": self.prompts,
             "epoch": epoch,
             "model_state": self.model.state_dict(),
             "optimizer_state": self.optimizer.state_dict(),
@@ -363,6 +386,14 @@ class Trainer:
             "val_metrics": val_stats,
             "best_val_metric": self.best_val_metric,
             "run_name": self.run_name,
+            "scaler_state": self.scaler.state_dict(),
+            "rng_state": {
+                "python": random.getstate(), "numpy": np.random.get_state(),
+                "torch": torch.get_rng_state(),
+                "cuda": torch.cuda.get_rng_state_all() if self.device.type == "cuda" else None,
+                "loader": (self.train_loader.generator.get_state()
+                           if self.train_loader.generator is not None else None),
+            },
         }
         # 每 epoch 覆盖最新 + 最优两档
         save_checkpoint(state, self.checkpoint_dir / self.run_name / "last.pt")
@@ -380,11 +411,30 @@ def resume_from_checkpoint(
         已训练完的 epoch 数（续训从 epoch+1 开始）。
     """
     state = load_checkpoint(ckpt_path)
+    if state.get("format_version") != 2:
+        raise ValueError("Legacy checkpoint lacks the updated optimizer/RNG protocol; "
+                         "start a new v2 run and preserve the old checkpoint for reference")
+    if state["prompts"] != trainer.prompts:
+        raise ValueError("Resume prompt set differs from checkpoint")
+    current = OmegaConf.to_container(trainer.cfg, resolve=True)
+    previous = state["config"]
+    for section in ("model", "data", "prompt", "seed", "train"):
+        if current[section] != previous[section]:
+            raise ValueError(f"Resume config mismatch in {section}; use the saved config snapshot")
     trainer.model.load_state_dict(state["model_state"])
     trainer.optimizer.load_state_dict(state["optimizer_state"])
     trainer.scheduler.load_state_dict(state["scheduler_state"])
     trainer.matcher.load_state_dict(state["matcher_state"])
     trainer.best_val_metric = float(state.get("best_val_metric", -1.0))
+    trainer.scaler.load_state_dict(state["scaler_state"])
+    rng = state["rng_state"]
+    random.setstate(rng["python"])
+    np.random.set_state(rng["numpy"])
+    torch.set_rng_state(rng["torch"])
+    if rng["cuda"] is not None and trainer.device.type == "cuda":
+        torch.cuda.set_rng_state_all(rng["cuda"])
+    if rng["loader"] is not None and trainer.train_loader.generator is not None:
+        trainer.train_loader.generator.set_state(rng["loader"])
     log.info("Resumed from epoch %d (best_val=%.4f)",
              state["epoch"], trainer.best_val_metric)
     return int(state["epoch"])

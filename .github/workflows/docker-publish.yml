@@ -1,0 +1,121 @@
+name: Docker Publish
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main]
+    paths:
+      - Dockerfile
+      - .dockerignore
+      - requirements/**
+      - scripts/docker/**
+      - scripts/dev.sh
+      - docker-compose*.yml
+      - .devcontainer/**
+      - .github/workflows/docker-publish.yml
+
+concurrency:
+  group: docker-publish-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  IMAGE: zgzdocker/vlm-ws
+
+jobs:
+  build-push:
+    name: Build and test ${{ matrix.variant }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - variant: cpu-amd64
+            runner: ubuntu-22.04
+            platform: linux/amd64
+            base: python:3.10-slim-bookworm
+            index: https://download.pytorch.org/whl/cpu
+            expect: cpu
+          - variant: cpu-arm64
+            runner: ubuntu-24.04-arm
+            platform: linux/arm64
+            base: python:3.10-slim-bookworm
+            index: https://download.pytorch.org/whl/cpu
+            expect: cpu
+          - variant: cuda12.1
+            runner: ubuntu-22.04
+            platform: linux/amd64
+            base: pytorch/pytorch:2.3.1-cuda12.1-cudnn8-runtime
+            index: https://download.pytorch.org/whl/cu121
+            expect: cuda
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Extract image metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=raw,value=${{ matrix.variant }}
+            type=sha,format=long,prefix=${{ matrix.variant }}-sha-
+            type=raw,value=dev,enable=${{ matrix.expect == 'cuda' }}
+
+      - name: Build locally for verification
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          load: true
+          tags: vlm-ws:verify
+          build-args: |
+            BASE_IMAGE=${{ matrix.base }}
+            TORCH_INDEX_URL=${{ matrix.index }}
+          cache-from: type=gha,scope=${{ matrix.variant }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.variant }}
+
+      - name: Verify environment and run project tests
+        env:
+          EXPECT: ${{ matrix.expect }}
+        run: |
+          docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp/devhome \
+            -v "$PWD:/workspace/vlm_ws" vlm-ws:verify \
+            python scripts/docker/check_environment.py --expect "$EXPECT" --allow-missing-gpu
+          docker run --rm --user "$(id -u):$(id -g)" -e HOME=/tmp/devhome \
+            -v "$PWD:/workspace/vlm_ws" vlm-ws:verify python -m pytest -q
+
+      - name: Publish verified image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: ${{ matrix.platform }}
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            BASE_IMAGE=${{ matrix.base }}
+            TORCH_INDEX_URL=${{ matrix.index }}
+          cache-from: type=gha,scope=${{ matrix.variant }}
+
+  cpu-manifest:
+    name: Publish multi-platform CPU tag
+    needs: build-push
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Merge the two verified CPU architectures
+        run: |
+          docker buildx imagetools create \
+            --tag "$IMAGE:cpu" \
+            --tag "$IMAGE:cpu-sha-$GITHUB_SHA" \
+            "$IMAGE:cpu-amd64-sha-$GITHUB_SHA" \
+            "$IMAGE:cpu-arm64-sha-$GITHUB_SHA"

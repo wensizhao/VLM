@@ -825,6 +825,6 @@ total_loss = contrastive_loss * 0.5 + anomaly_loss * 0.5
 | Fusion 做 Cartesian Product | K 增大时 OOM，Text Memory 模式 O(K) safe |
 | Alignment 里做 similarity | Matcher 独立模块，职责分离 |
 | Head 里做 per-prompt 匹配 | Matcher 统一处理 |
-| `explanation` 字段 | 先跑通基础 pipeline |
+| 模型内部生成解释文本 | `ModelOutput.explanation` 可为 None；评估模块生成检索模板解释 |
 | 在 VLMModel 里做 `if/else` | 所有模块输入输出类型一致 |
 | Learnable Prompt / Prefix Tuning | PromptProcessor 预留接口，后续迭代 |

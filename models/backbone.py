@@ -9,6 +9,8 @@ import torch.nn.functional as F
 from torch import Tensor
 
 import open_clip
+from torchvision.transforms import InterpolationMode
+from torchvision.transforms import functional as TF
 
 
 class CLIPBackbone(nn.Module):
@@ -38,12 +40,18 @@ class CLIPBackbone(nn.Module):
             model_name, pretrained=pretrained,
         )
         self._clip = model
+        self.model_name = model_name
+        self.pretrained = pretrained
+        self.preprocess_cfg = open_clip.get_model_preprocess_cfg(model)
         # Tokenizer 和 text encoder 强绑定（BPE / vocab 必须一致），放在这里
         self._tokenizer = open_clip.get_tokenizer(model_name)
 
         # 把模型的参数移到正确的设备上已经在 create_model_and_transforms 之后完成；
         # 这里记录 text transformer 的内部宽度以便 encode_text 做 projection 判断。
         self._text_width: int = self._clip.transformer.width
+        self._vision_frozen = False
+        self._text_frozen = False
+        self._text_cache: dict[tuple, Tensor] = {}
 
     # ── 核心 API ────────────────────────────────────────────────────
 
@@ -59,9 +67,32 @@ class CLIPBackbone(nn.Module):
         """
         B, T = video.shape[:2]
         # 把 T 维并入 batch 维：每帧当作独立的图像
-        video_flat = video.view(B * T, *video.shape[2:])          # (B*T, C, H, W)
+        video_flat = video.reshape(B * T, *video.shape[2:])
+        video_flat = self.preprocess_images(video_flat)
         features = self._clip.encode_image(video_flat, normalize=True)  # (B*T, D)
         return features.view(B, T, -1)                            # (B, T, D)
+
+    def preprocess_images(self, images: Tensor) -> Tensor:
+        """RGB (N,3,H,W) in [0,1] → resized, cropped and normalized CLIP input.
+
+        Shared by pixel inference and feature extraction; caches are never normalized twice.
+        """
+        # Pixel datasets and extraction must use the same memory layout as well as transform.
+        images = images.contiguous()
+        size = self.preprocess_cfg["size"]
+        target = (size, size) if isinstance(size, int) else tuple(size)
+        mode = self.preprocess_cfg.get("resize_mode", "shortest")
+        interpolation = InterpolationMode(self.preprocess_cfg.get("interpolation", "bicubic"))
+        if mode == "shortest":
+            if target[0] != target[1]:
+                raise ValueError("Non-square shortest resize requires another backbone adapter")
+            images = TF.resize(images, target[0], interpolation=interpolation, antialias=True)
+            images = TF.center_crop(images, target)
+        elif mode == "squash":
+            images = TF.resize(images, target, interpolation=interpolation, antialias=True)
+        else:
+            raise ValueError(f"Unsupported CLIP resize_mode={mode!r}; register a backbone adapter")
+        return TF.normalize(images, self.preprocess_cfg["mean"], self.preprocess_cfg["std"])
 
     def encode_text(self, prompts: list[str]) -> Tensor:
         """对文本 prompts 逐 token 编码，**不取 EOS 池化**。
@@ -77,6 +108,10 @@ class CLIPBackbone(nn.Module):
             包含填充 token 但已做 L2 归一化；下游 CrossAttnFusion 可通过
             ``key_padding_mask`` 屏蔽填充位置。
         """
+        cache_key = (tuple(prompts), str(self.device), next(self.parameters()).dtype,
+                     torch.is_autocast_enabled())
+        if self._text_frozen and cache_key in self._text_cache:
+            return self._text_cache[cache_key]
         tokens = self._tokenizer(prompts).to(self.device)         # (K, 77)
 
         # 复刻 CLIP.encode_text 的前半部分，但在 text_global_pool 之前停下来
@@ -90,7 +125,10 @@ class CLIPBackbone(nn.Module):
         if self._clip.text_projection is not None:
             x = x @ self._clip.text_projection                    # (K, 77, D)
 
-        return F.normalize(x, dim=-1)                             # token 级 L2 归一化
+        encoded = F.normalize(x, dim=-1)
+        if self._text_frozen:
+            self._text_cache[cache_key] = encoded.detach()
+        return encoded
 
     def encode_text_pooled(self, prompts: list[str]) -> Tensor:
         """完整 CLIP 文本编码（EOS 池化 + projection），返回 ``(K, D)``。
@@ -146,6 +184,8 @@ class CLIPBackbone(nn.Module):
     def freeze_vision(self) -> None:
         """冻结所有视觉参数（Vision Transformer 全部权重）。"""
         self._clip.visual.requires_grad_(False)
+        self._vision_frozen = True
+        self._clip.visual.eval()
 
     def freeze_text(self) -> None:
         """冻结所有文本参数（transformer + token embedding + ln_final + projection）。"""
@@ -155,10 +195,14 @@ class CLIPBackbone(nn.Module):
         self._clip.positional_embedding.requires_grad_(False)
         if self._clip.text_projection is not None:
             self._clip.text_projection.requires_grad_(False)
+        self._text_frozen = True
+        self._clip.transformer.eval()
+        self._text_cache.clear()
 
     def unfreeze_vision(self) -> None:
         """解冻所有视觉参数。"""
         self._clip.visual.requires_grad_(True)
+        self._vision_frozen = False
 
     def unfreeze_text(self) -> None:
         """解冻所有文本参数。"""
@@ -168,6 +212,20 @@ class CLIPBackbone(nn.Module):
         self._clip.positional_embedding.requires_grad_(True)
         if self._clip.text_projection is not None:
             self._clip.text_projection.requires_grad_(True)
+        self._text_frozen = False
+        self._text_cache.clear()
+
+    def train(self, mode: bool = True) -> CLIPBackbone:
+        super().train(mode)
+        if self._vision_frozen:
+            self._clip.visual.eval()
+        if self._text_frozen:
+            self._clip.transformer.eval()
+        return self
+
+    def _load_from_state_dict(self, *args, **kwargs) -> None:
+        self._text_cache.clear()
+        super()._load_from_state_dict(*args, **kwargs)
 
     # ── 辅助 ────────────────────────────────────────────────────────
 

@@ -1,0 +1,5 @@
+# Fixed a priori; test labels are never used to tune these parameters.
+max_bank_frames: 4096
+k: 5
+query_chunk_size: 256
+calibration_quantile: 0.99

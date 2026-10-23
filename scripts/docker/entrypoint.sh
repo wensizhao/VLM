@@ -33,7 +33,7 @@ if [ -f "${OPENCODE_AUTH_STAGE}" ]; then
   if [ -w "${OPENCODE_AUTH_DIR}" ]; then
     install -m 0600 "${OPENCODE_AUTH_STAGE}" "${OPENCODE_AUTH_DIR}/auth.json"
   else
-    echo "warning: ${OPENCODE_AUTH_DIR} is not writable; run 'docker compose down -v' to recreate the dev-home volume." >&2
+    echo "warning: ${OPENCODE_AUTH_DIR} is not writable; check ownership of the dev-home volume." >&2
   fi
 fi
 

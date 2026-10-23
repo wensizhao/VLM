@@ -1,0 +1,391 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>VLM-VAD Studio</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<div class="shell">
+  <aside class="sidebar">
+    <div class="brand">
+      <div class="brand-mark">V</div>
+      <div>
+        <div class="brand-name">VLM-VAD</div>
+        <div class="brand-sub">STUDIO</div>
+      </div>
+    </div>
+
+    <nav class="nav">
+      <button class="nav-item active" data-view="overview">
+        <span class="nav-icon">◈</span><span>概览</span>
+      </button>
+      <button class="nav-item" data-view="datasets">
+        <span class="nav-icon">▤</span><span>数据集</span>
+      </button>
+      <button class="nav-item" data-view="train">
+        <span class="nav-icon">▶</span><span>训练</span>
+      </button>
+      <button class="nav-item" data-view="validate">
+        <span class="nav-icon">◔</span><span>验证</span>
+      </button>
+      <button class="nav-item" data-view="compare">
+        <span class="nav-icon">▥</span><span>对比</span>
+      </button>
+    </nav>
+
+    <div class="sidebar-bottom">
+      <div class="status-line"><span class="dot" id="device-dot"></span><span id="device-label">检测环境中…</span></div>
+      <div class="status-line muted ellipsis" id="project-path"></div>
+      <div class="status-line muted">本地研究工具 · 无认证</div>
+    </div>
+  </aside>
+
+  <main class="main">
+    <header class="topbar">
+      <div class="topbar-title">
+        <div class="eyebrow" id="view-eyebrow">WORKSPACE</div>
+        <h1 id="view-title">概览</h1>
+        <p id="view-subtitle">数据集、训练与验证的统一入口</p>
+      </div>
+      <div class="topbar-actions">
+        <span id="active-job-chip" class="chip chip-live hidden"></span>
+        <button id="refresh-btn" class="btn btn-ghost">刷新</button>
+      </div>
+    </header>
+
+    <!-- ============================ OVERVIEW ============================ -->
+    <section id="view-overview" class="view">
+      <div class="hero card">
+        <div class="hero-copy">
+          <div class="pill">VISION-LANGUAGE · VIDEO ANOMALY DETECTION</div>
+          <h2>数据集管理、训练监控与结果验证</h2>
+          <p>导入 Avenue 结构数据集，配置 prompt、fusion 与训练参数后启动训练；训练过程实时显示 loss 与 AUC，结束后可查看逐视频指标、热力图与检索式解释。</p>
+          <div class="hero-actions">
+            <button class="btn btn-primary" data-goto="train">开始训练</button>
+            <button class="btn" data-goto="datasets">管理数据集</button>
+            <button class="btn btn-ghost" data-goto="validate">查看已有结果</button>
+          </div>
+        </div>
+        <div class="hero-orbit">
+          <div class="orbit-ring ring-a"></div>
+          <div class="orbit-ring ring-b"></div>
+          <div class="orbit-core">VLM</div>
+          <div class="orbit-tag tag-a">prompt</div>
+          <div class="orbit-tag tag-b">frame score</div>
+          <div class="orbit-tag tag-c">heatmap</div>
+        </div>
+      </div>
+
+      <div class="stat-grid" id="overview-stats"></div>
+
+      <div class="grid two">
+        <div class="card">
+          <div class="card-head">
+            <h2>最近运行</h2>
+            <button class="link" data-goto="validate">查看全部</button>
+          </div>
+          <div id="recent-runs" class="list"></div>
+        </div>
+        <div class="card">
+          <div class="card-head">
+            <h2>系统状态</h2>
+            <span class="hint">只读检查</span>
+          </div>
+          <div id="system-status" class="list"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============================ DATASETS ============================ -->
+    <section id="view-datasets" class="view hidden">
+      <div class="grid two datasets-top">
+        <div class="card">
+          <div class="card-head">
+            <h2>拖入数据集</h2>
+            <span class="hint">Avenue 结构</span>
+          </div>
+          <div id="dropzone" class="dropzone">
+            <div class="drop-icon">↑</div>
+            <h3>把文件夹或 ZIP 拖到这里</h3>
+            <p>需要 <code>training_videos/</code> 和 <code>testing_videos/</code>；只有视频也可以，随后一键生成运动标签。</p>
+            <div class="drop-actions">
+              <button class="btn btn-primary" id="pick-folder">选择文件夹</button>
+              <button class="btn" id="pick-zip">选择 ZIP</button>
+            </div>
+            <input id="folder-input" type="file" webkitdirectory multiple hidden>
+            <input id="zip-input" type="file" accept=".zip" hidden>
+          </div>
+          <div class="upload-row">
+            <input id="upload-name" class="input" placeholder="数据集名称（可选）">
+            <button class="btn" id="pick-zip-2">上传 ZIP</button>
+          </div>
+          <div class="upload-row">
+            <input id="register-path" class="input" placeholder="或注册服务器路径，如 data/uploads/my_dataset">
+            <button class="btn" id="register-btn">注册路径</button>
+          </div>
+          <div id="upload-progress" class="upload-progress hidden">
+            <div class="bar"><span id="upload-bar"></span></div>
+            <span id="upload-text" class="muted"></span>
+          </div>
+        </div>
+
+        <div class="card">
+          <div class="card-head">
+            <h2>数据集</h2>
+            <span class="hint" id="dataset-count"></span>
+          </div>
+          <div id="dataset-list" class="dataset-list"></div>
+        </div>
+      </div>
+
+      <div id="dataset-detail" class="card hidden"></div>
+    </section>
+
+    <!-- ============================ TRAIN ============================ -->
+    <section id="view-train" class="view hidden">
+      <div class="grid train-layout">
+        <div class="card">
+          <div class="card-head">
+            <h2>训练配置</h2>
+            <span class="hint">配置会落盘到 configs/generated</span>
+          </div>
+          <form id="train-form" class="form">
+            <label class="field">
+              <span>数据集</span>
+              <select id="train-dataset" class="input"></select>
+            </label>
+            <div id="train-dataset-hint" class="hint"></div>
+
+            <div class="form-grid">
+              <label class="field">
+                <span>Run 名称</span>
+                <input id="train-run-name" class="input" required>
+              </label>
+              <label class="field">
+                <span>Epochs</span>
+                <input id="train-epochs" class="input" type="number" min="1" max="100" value="10">
+              </label>
+              <label class="field">
+                <span>Batch size</span>
+                <input id="train-batch" class="input" type="number" min="1" max="64" value="4">
+              </label>
+              <label class="field">
+                <span>Device</span>
+                <select id="train-device" class="input">
+                  <option value="auto">auto</option>
+                  <option value="cpu">cpu</option>
+                  <option value="cuda">cuda</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>Fusion</span>
+                <select id="train-fusion" class="input">
+                  <option value="concat">concat</option>
+                  <option value="gated">gated</option>
+                  <option value="crossattn">crossattn</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>Temporal</span>
+                <select id="train-temporal" class="input">
+                  <option value="identity">identity</option>
+                  <option value="transformer">transformer</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>标签模式</span>
+                <select id="train-label-mode" class="input">
+                  <option value="motion_diff">motion_diff</option>
+                  <option value="pixel">pixel (真实 mask)</option>
+                </select>
+              </label>
+              <label class="field">
+                <span>特征缓存</span>
+                <select id="train-use-feature" class="input">
+                  <option value="auto">auto</option>
+                  <option value="true">true (必须)</option>
+                  <option value="false">false (像素路径)</option>
+                </select>
+              </label>
+            </div>
+
+            <div class="field-group">
+              <span class="field-label">Prompt 类型</span>
+              <label class="check"><input type="checkbox" class="prompt-type" value="label" checked> label</label>
+              <label class="check"><input type="checkbox" class="prompt-type" value="scene" checked> scene</label>
+              <label class="check"><input type="checkbox" class="prompt-type" value="contrast" checked> contrast</label>
+            </div>
+
+            <label class="check"><input id="train-skip-eval" type="checkbox"> 只训练，不自动测试评估（无 testing 集时勾选）</label>
+
+            <div class="form-actions">
+              <button class="btn btn-primary" id="train-submit" type="submit">开始训练</button>
+              <span id="train-form-error" class="form-error"></span>
+            </div>
+          </form>
+        </div>
+
+        <div class="card job-card">
+          <div class="card-head">
+            <h2 id="job-title">实时进度</h2>
+            <span id="job-status" class="badge">空闲</span>
+          </div>
+          <div id="job-empty" class="empty">
+            <div class="empty-icon">◎</div>
+            <p>还没有运行中的任务。配置左侧表单即可开始。</p>
+          </div>
+          <div id="job-live" class="hidden">
+            <div class="job-meta">
+              <span id="job-run"></span>
+              <span id="job-elapsed"></span>
+            </div>
+            <div class="progress-line">
+              <div class="bar"><span id="job-bar"></span></div>
+              <span id="job-percent">0%</span>
+            </div>
+            <div id="job-phase" class="muted"></div>
+            <div id="job-metrics" class="metric-grid"></div>
+            <canvas id="train-chart" width="900" height="280"></canvas>
+            <div class="log-head">
+              <span>日志</span>
+              <button id="job-stop" class="link danger" type="button">停止任务</button>
+            </div>
+            <pre id="train-log" class="log"></pre>
+            <div class="job-footer">
+              <button id="job-results" class="btn btn-primary hidden" type="button">查看结果</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============================ VALIDATE ============================ -->
+    <section id="view-validate" class="view hidden">
+      <div class="card">
+        <div class="card-head">
+          <h2>运行与验证</h2>
+          <div class="toolbar">
+            <select id="validate-run" class="input"></select>
+            <button id="validate-refresh" class="btn" type="button">刷新</button>
+          </div>
+        </div>
+        <div id="validate-empty" class="empty">
+          <div class="empty-icon">◔</div>
+          <p>还没有可验证的运行结果。</p>
+        </div>
+        <div id="validate-content" class="hidden">
+          <div id="validate-header" class="run-header"></div>
+          <div id="validate-metrics" class="stat-grid"></div>
+
+          <div class="grid two">
+            <div class="card inner">
+              <div class="card-head"><h3>逐视频指标</h3><span class="hint">Frame AUC / AP</span></div>
+              <div id="validate-table" class="table-wrap"></div>
+            </div>
+            <div class="card inner">
+              <h3>操作</h3>
+              <div class="action-stack">
+                <button id="eval-motion" class="btn" type="button">运动标签复评</button>
+                <button id="eval-official" class="btn" type="button">官方标签复评</button>
+                <button id="run-demo" class="btn" type="button">生成可视化 Demo</button>
+              </div>
+              <div id="validate-notes" class="muted note-box"></div>
+            </div>
+          </div>
+
+          <div class="card inner">
+            <div class="card-head">
+              <h3>热力图与 prompt 相似度</h3>
+              <span class="hint" id="plot-count"></span>
+            </div>
+            <div id="validate-gallery" class="gallery"></div>
+          </div>
+
+          <div class="grid two">
+            <div class="card inner">
+              <div class="card-head">
+                <h3>解释</h3>
+                <select id="explain-video" class="input small"></select>
+              </div>
+              <div id="validate-explanations" class="explanation"></div>
+            </div>
+            <div class="card inner">
+              <h3>运行信息</h3>
+              <div id="validate-config" class="kv"></div>
+            </div>
+          </div>
+
+          <div class="card inner">
+            <h3>Demo 文件</h3>
+            <div id="validate-demo" class="demo-list"></div>
+          </div>
+        </div>
+      </div>
+
+      <div class="grid two">
+        <div class="card">
+          <div class="card-head"><h3>Zero-shot 快速评估</h3><span class="hint">冻结 CLIP</span></div>
+          <p class="muted">不训练，直接比较异常 prompt 与正常 prompt 的相似度差。结果会出现在上方运行列表。</p>
+          <div class="button-row">
+            <button class="btn zero-shot" data-prompt="label" type="button">label</button>
+            <button class="btn zero-shot" data-prompt="scene" type="button">scene</button>
+            <button class="btn zero-shot" data-prompt="contrast" type="button">contrast</button>
+            <button class="btn zero-shot" data-prompt="all" type="button">all</button>
+          </div>
+          <div id="zero-shot-result" class="muted"></div>
+        </div>
+
+        <div class="card">
+          <div class="card-head">
+            <h3>任务历史</h3>
+            <button id="jobs-refresh" class="link" type="button">刷新</button>
+          </div>
+          <div id="jobs-table" class="table-wrap"></div>
+        </div>
+      </div>
+    </section>
+
+    <!-- ============================ COMPARE ============================ -->
+    <section id="view-compare" class="view hidden">
+      <div class="card">
+        <div class="card-head">
+          <h2>运行对比</h2>
+          <div class="toolbar">
+            <button id="compare-refresh" class="btn" type="button">刷新</button>
+          </div>
+        </div>
+        <div class="grid two">
+          <div>
+            <h3>选择运行</h3>
+            <div id="compare-runs" class="check-list"></div>
+          </div>
+          <div>
+            <h3>Frame AUC / Clip AUC</h3>
+            <canvas id="compare-chart" width="900" height="340"></canvas>
+          </div>
+        </div>
+        <div id="compare-table" class="table-wrap"></div>
+      </div>
+    </section>
+  </main>
+</div>
+
+<div id="modal" class="modal hidden">
+  <div class="modal-backdrop" data-close-modal></div>
+  <div class="modal-card">
+    <button class="modal-close" data-close-modal type="button">×</button>
+    <div id="modal-body"></div>
+  </div>
+</div>
+
+<div id="toasts" class="toasts"></div>
+<script src="{{ url_for('static', filename='core.js') }}"></script>
+<script src="{{ url_for('static', filename='datasets.js') }}"></script>
+<script src="{{ url_for('static', filename='training.js') }}"></script>
+<script src="{{ url_for('static', filename='validate.js') }}"></script>
+<script src="{{ url_for('static', filename='compare.js') }}"></script>
+<script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>

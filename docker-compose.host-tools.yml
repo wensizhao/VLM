@@ -1,0 +1,26 @@
+# Optional personal configuration. Use VLM_HOST_TOOLS=1 with scripts/dev.sh.
+# All three host paths must exist; missing files never become root-owned dirs.
+services:
+  vlm-dev:
+    volumes:
+      - type: bind
+        source: ${HOST_OPENCODE_CONFIG:-${HOME}/.config/opencode}
+        target: /tmp/devhome/.config/opencode
+        read_only: true
+        bind:
+          create_host_path: false
+          selinux: z
+      - type: bind
+        source: ${HOST_OPENCODE_AUTH:-${HOME}/.local/share/opencode/auth.json}
+        target: /opt/opencode-host/auth.json
+        read_only: true
+        bind:
+          create_host_path: false
+          selinux: z
+      - type: bind
+        source: ${HOST_AGENTS_DIR:-${HOME}/.agents}
+        target: /tmp/devhome/.agents
+        read_only: true
+        bind:
+          create_host_path: false
+          selinux: z

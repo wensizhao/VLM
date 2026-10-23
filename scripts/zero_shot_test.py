@@ -34,6 +34,8 @@ from utils.config import load_experiment_config, save_config_snapshot
 from utils.io import ensure_dirs
 from utils.logging import get_logger
 from utils.reproducibility import set_seed
+from utils.provenance import runtime_info
+from utils.io import save_json
 
 log = get_logger(__name__)
 
@@ -70,6 +72,7 @@ def main() -> None:
     log.info("Zero-shot test | config=%s device=%s prompts=%s", args.config, device, args.prompts)
     ensure_dirs({"out": out_dir, "summary": output_path.parent})
     save_config_snapshot(cfg, out_dir / "config.yaml")
+    save_json(runtime_info(), out_dir / "environment.json")
 
     backbone = CLIPBackbone(
         model_name=str(cfg.model.backbone.name),
@@ -79,6 +82,7 @@ def main() -> None:
 
     loader, src = build_split_dataloader(
         cfg.data, split=cfg.data.eval_split, shuffle=False, seed=int(cfg.seed),
+        backbone_cfg=cfg.model.backbone,
     )
     log.info("Eval data ready | split=%s source=%s batches=%d",
              cfg.data.eval_split, src, len(loader))
@@ -110,7 +114,7 @@ def main() -> None:
     with open(output_path, "w") as f:
         json.dump(summary, f, indent=2, ensure_ascii=False)
 
-    log.info("Zero-shot done in %.1fs | frame_auc=%.4f frame_ap=%.4f video_auc=%.4f video_ap=%.4f",
+    log.info("Zero-shot done in %.1fs | frame_auc=%s frame_ap=%s video_auc=%s video_ap=%s",
              elapsed, results["metrics"].get("frame_auc", 0.0),
              results["metrics"].get("frame_ap", 0.0),
              results["metrics"].get("video_auc", 0.0),

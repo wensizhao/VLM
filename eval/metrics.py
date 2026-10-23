@@ -44,6 +44,33 @@ import numpy as np
 from sklearn.metrics import average_precision_score, roc_auc_score
 
 
+def binary_ranking_metrics(scores: np.ndarray, labels: np.ndarray, level: str) -> dict[str, float | None]:
+    """Export undefined ROC-AUC as null; AP needs positives but not negatives.
+
+    Training's historical numeric guard remains separate from exported research
+    metrics. Invalid input is an error, never a zero performance measurement.
+    """
+    scores = np.asarray(scores, dtype=np.float64).reshape(-1)
+    labels = np.asarray(labels).reshape(-1)
+    if scores.shape != labels.shape or not np.isfinite(scores).all():
+        raise ValueError("Metrics require aligned finite scores and labels")
+    if not ((labels == 0) | (labels == 1)).all():
+        raise ValueError("Metrics require binary labels")
+    positive = int(labels.sum())
+    negative = len(labels) - positive
+    return {
+        f"{level}_auc": float(roc_auc_score(labels, scores)) if positive and negative else None,
+        f"{level}_ap": min(1.0, float(average_precision_score(labels, scores))) if positive else None,
+    }
+
+
+def reported_video_metrics(scores: dict[str, float], labels: dict[str, int]) -> dict[str, float | None]:
+    if set(scores) != set(labels):
+        raise ValueError("Video score/label IDs differ")
+    return binary_ranking_metrics(np.array(list(scores.values())),
+                                  np.array([labels[k] for k in scores]), "video")
+
+
 def _guard_sklearn(fn: Any, scores: np.ndarray, labels: np.ndarray) -> float:
     """安全地调用 sklearn 指标。
 

@@ -98,6 +98,13 @@ class FakeCLIPBackbone(nn.Module):
         """``(B,T,C,H,W)`` → ``(B,T,D)``（对空间维做均值再投影）。"""
         return self.frame_proj(video.mean(dim=(3, 4)))
 
+    def tokenize(self, prompts: list[str]) -> torch.Tensor:
+        """与 ``CLIPBackbone.tokenize`` 对齐：``list[str]`` → ``(K,L)`` token id。
+
+        假 backbone 不做真实分词，所有位置都视为真实 token（id=1，无 padding）。
+        """
+        return torch.ones(len(prompts), self._seq_len, dtype=torch.long)
+
     def encode_text(self, prompts: list[str]) -> torch.Tensor:
         """``list[str]`` → ``(K,L,D)``——确定性的非零正弦编码（形状/数值可复现）。"""
         k = len(prompts)
